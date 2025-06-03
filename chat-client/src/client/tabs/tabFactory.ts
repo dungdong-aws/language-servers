@@ -11,6 +11,7 @@ import { ChatMessage } from '@aws/language-server-runtimes-types'
 import { ChatHistory } from '../features/history'
 import { pairProgrammingPromptInput, programmerModeCard } from '../texts/pairProgramming'
 import { modelSelection } from '../texts/modelSelection'
+import { voiceInputMode } from '../texts/voiceInput'
 
 export type DefaultTabData = MynahUIDataModel
 
@@ -43,8 +44,8 @@ export class TabFactory {
             ...this.getDefaultTabData(),
             ...(disclaimerCardActive ? { promptInputStickyCard: disclaimerCard } : {}),
             promptInputOptions: this.agenticMode
-                ? [pairProgrammingPromptInput, ...(this.modelSelectionEnabled ? [modelSelection] : [])]
-                : [],
+                ? [pairProgrammingPromptInput, ...(this.modelSelectionEnabled ? [modelSelection] : []), voiceInputMode]
+                : [voiceInputMode],
             cancelButtonWhenLoading: this.agenticMode, // supported for agentic chat only
         }
         return tabData

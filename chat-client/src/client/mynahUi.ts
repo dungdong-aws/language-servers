@@ -58,6 +58,9 @@ import {
 import { ChatHistory, ChatHistoryList } from './features/history'
 import { pairProgrammingModeOff, pairProgrammingModeOn, programmerModeCard } from './texts/pairProgramming'
 import { getModelSelectionChatItem } from './texts/modelSelection'
+import { voiceInputModeOn, voiceInputModeOff } from './texts/voiceInput'
+import { SpeechRecognitionService } from './features/voice'
+let speechRecognitionService: SpeechRecognitionService | null = null
 
 export interface InboundChatApi {
     addChatResponse(params: ChatResult, tabId: string, isPartialResult: boolean): void
@@ -93,6 +96,9 @@ const getTabPairProgrammingMode = (mynahUi: MynahUI, tabId: string) =>
 const getTabModelSelection = (mynahUi: MynahUI, tabId: string) =>
     getTabPromptInputValue(mynahUi, tabId, 'model-selection')
 
+const getVoiceInputMode = (mynahUi: MynahUI, tabId: string) =>
+    getTabPromptInputValue(mynahUi, tabId, 'voice-input-mode') === 'true' || false
+
 export const handlePromptInputChange = (mynahUi: MynahUI, tabId: string, optionsValues: Record<string, string>) => {
     const previousPairProgrammerValue = getTabPairProgrammingMode(mynahUi, tabId)
     const currentPairProgrammerValue = optionsValues['pair-programmer-mode'] === 'true'
@@ -106,6 +112,30 @@ export const handlePromptInputChange = (mynahUi: MynahUI, tabId: string, options
 
     if (currentModelSelectionValue !== previousModelSelectionValue) {
         mynahUi.addChatItem(tabId, getModelSelectionChatItem(currentModelSelectionValue))
+    }
+
+    const previousVoiceInputValue = getVoiceInputMode(mynahUi, tabId)
+    const currentVoiceInputValue = optionsValues['voice-input-mode'] === 'true'
+
+    if (previousVoiceInputValue !== currentVoiceInputValue) {
+        // Initialize speech recognition service if needed
+        if (!speechRecognitionService) {
+            speechRecognitionService = new SpeechRecognitionService(mynahUi)
+        }
+
+        if (currentVoiceInputValue) {
+            // Start listening when voice input is turned on
+            const success = speechRecognitionService.startListening(tabId)
+            if (success) {
+                mynahUi.addChatItem(tabId, voiceInputModeOn)
+            }
+        } else {
+            // Stop listening when voice input is turned off
+            if (speechRecognitionService) {
+                speechRecognitionService.stopListening()
+            }
+            mynahUi.addChatItem(tabId, voiceInputModeOff)
+        }
     }
 
     const promptInputOptions = mynahUi.getTabData(tabId).getStore()?.promptInputOptions
