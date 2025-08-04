@@ -693,6 +693,8 @@ export function convertPersonaToAgent(
                 preset: 'readOnly',
             },
         ],
+        allowList: ['ls'],
+        denyList: ['rm'],
     }
 
     agent.toolsSettings['use_aws'] = {

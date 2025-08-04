@@ -30,6 +30,7 @@ import {
 } from './mcpTypes'
 import { TelemetryService } from '../../../../shared/telemetry/telemetryService'
 import { URI } from 'vscode-uri'
+import { EXECUTE_BASH } from '../../constants/toolConstants'
 
 interface PermissionOption {
     label: string
@@ -1069,6 +1070,20 @@ export class McpEventHandler {
                     : {}),
                 ...{ value: item.permission, boldTitle: true, mandatory: true, hideMandatoryIcon: true },
             })
+
+            if (toolName === EXECUTE_BASH) {
+                filterOptions.push({
+                    type: 'pillbox',
+                    id: 'trust_commands',
+                    title: 'executeBash Trusted Commands',
+                } as unknown as FilterOption)
+
+                filterOptions.push({
+                    type: 'pillbox',
+                    id: 'deny_commands',
+                    title: 'executeBash Denied Commands',
+                } as unknown as FilterOption)
+            }
         })
 
         return filterOptions
@@ -1415,16 +1430,26 @@ export class McpEventHandler {
      * Processes permission updates from the UI
      */
     async #processPermissionUpdates(serverName: string, updatedPermissionConfig: any, agentPath: string | undefined) {
+        const builtInToolAgentPath = await this.#getAgentPath()
         const perm: MCPServerPermission = {
             enabled: true,
             toolPerms: {},
-            __configPath__: agentPath,
+            trustedCommands: [],
+            deniedCommands: [],
+            __configPath__: serverName === 'Built-in' ? builtInToolAgentPath : agentPath,
         }
 
         // Process each tool permission setting
         for (const [key, val] of Object.entries(updatedPermissionConfig)) {
             if (key === 'scope') continue
-
+            if (key === 'trust_commands') {
+                perm.trustedCommands = (val as string).split(',')
+                continue
+            }
+            if (key === 'deny_commands') {
+                perm.deniedCommands = (val as string).split(',')
+                continue
+            }
             const currentPerm = McpManager.instance.getToolPerm(serverName, key)
             if (val === currentPerm) continue
             switch (val) {

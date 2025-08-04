@@ -448,7 +448,7 @@ export class McpManager {
      */
     public isToolDisabled(server: string, tool: string): boolean {
         // built-in tools cannot be disabled
-        if (server === 'builtIn') {
+        if (server === 'Built-in') {
             return false
         }
 
@@ -522,6 +522,12 @@ export class McpManager {
         return this.agentConfig.allowedTools.includes(toolId) ? McpPermissionType.alwaysAllow : McpPermissionType.ask
     }
 
+    public getTrustedCommands() {
+        return this.agentConfig.toolsSettings?.['execute_bash']?.allowList
+    }
+    public getDenyCommands() {
+        return this.agentConfig.toolsSettings?.['execute_bash']?.denyList
+    }
     /**
      * Return a list of all server configurations.
      */

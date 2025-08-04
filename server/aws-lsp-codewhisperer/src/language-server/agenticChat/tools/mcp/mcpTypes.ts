@@ -40,6 +40,8 @@ export interface MCPServerConfig {
 export interface MCPServerPermission {
     enabled: boolean
     toolPerms: Record<string, McpPermissionType>
+    trustedCommands?: string[]
+    deniedCommands?: string[]
     __configPath__?: string
 }
 

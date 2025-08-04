@@ -1797,6 +1797,9 @@ export class AgenticChatController implements ChatHandlers {
 
                         const isExecuteBash = toolUse.name === EXECUTE_BASH
 
+                        const allowList = McpManager.instance.getTrustedCommands()
+                        const denyList = McpManager.instance.getDenyCommands()
+
                         // check if tool execution's path is out of workspace
                         const isOutOfWorkSpace = warning === OUT_OF_WORKSPACE_WARNING_MSG
                         // check if tool involved secured files
