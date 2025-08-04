@@ -999,6 +999,42 @@ export class McpManager {
                 }
             }
 
+            // check inequality faster than checking for equality
+            const isChange = (arr1: string[], arr2: string[]) => {
+                if (arr1.length !== arr2.length) return true
+
+                if (arr1.length === 0) return false
+
+                for (let i = 0; i < arr1.length; i++) {
+                    if (arr1[i] !== arr2[i]) return true
+                }
+
+                return false
+            }
+            // Update allow list for executeBash
+            if (serverName === 'Built-in') {
+                // Ensure toolsSettings exists
+                if (!this.agentConfig.toolsSettings) {
+                    this.agentConfig.toolsSettings = {}
+                }
+                // Ensure executeBash settings exist
+                if (!this.agentConfig.toolsSettings['execute_bash']) {
+                    this.agentConfig.toolsSettings['execute_bash'] = {}
+                }
+
+                const isAllowListChange = isChange(
+                    this.agentConfig.toolsSettings['execute_bash'].allowList,
+                    perm.trustedCommands!
+                )
+                const isDenyListChange = isChange(
+                    this.agentConfig.toolsSettings['execute_bash'].denyList,
+                    perm.trustedCommands!
+                )
+
+                if (isAllowListChange) this.agentConfig.toolsSettings['execute_bash'].allowList = perm.trustedCommands
+                if (isDenyListChange) this.agentConfig.toolsSettings['execute_bash'].denyList = perm.deniedCommands
+            }
+
             // Save agent config
             const agentPath = perm.__configPath__
             if (agentPath) {

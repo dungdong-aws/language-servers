@@ -1072,16 +1072,22 @@ export class McpEventHandler {
             })
 
             if (toolName === EXECUTE_BASH) {
+                // get trust commands
+                const allowList = McpManager.instance.getTrustedCommands()
                 filterOptions.push({
                     type: 'pillbox',
                     id: 'trust_commands',
                     title: 'executeBash Trusted Commands',
+                    value: allowList.join(','),
                 } as unknown as FilterOption)
 
+                // get deny commands
+                const denyList = McpManager.instance.getDenyCommands()
                 filterOptions.push({
                     type: 'pillbox',
                     id: 'deny_commands',
                     title: 'executeBash Denied Commands',
+                    value: denyList.join(','),
                 } as unknown as FilterOption)
             }
         })
