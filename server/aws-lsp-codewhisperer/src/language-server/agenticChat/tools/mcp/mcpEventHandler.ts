@@ -1449,11 +1449,19 @@ export class McpEventHandler {
         for (const [key, val] of Object.entries(updatedPermissionConfig)) {
             if (key === 'scope') continue
             if (key === 'trust_commands') {
-                perm.trustedCommands = (val as string).split(',')
+                if ((val as string) !== '') {
+                    perm.trustedCommands = (val as string).split(',')
+                } else {
+                    perm.trustedCommands = []
+                }
                 continue
             }
             if (key === 'deny_commands') {
-                perm.deniedCommands = (val as string).split(',')
+                if ((val as string) !== '') {
+                    perm.deniedCommands = (val as string).split(',')
+                } else {
+                    perm.deniedCommands = []
+                }
                 continue
             }
             const currentPerm = McpManager.instance.getToolPerm(serverName, key)
