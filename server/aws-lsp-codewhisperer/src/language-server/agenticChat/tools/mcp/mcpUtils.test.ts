@@ -697,7 +697,7 @@ describe('convertPersonaToAgent', () => {
         const persona = { mcpServers: ['*'], toolPerms: {} }
         const mcpServers = { testServer: { command: 'test', args: [], env: {} } }
 
-        const result = convertPersonaToAgent(persona, mcpServers, mockAgent)
+        const result = convertPersonaToAgent(persona, mcpServers, mockAgent, mockAgent)
 
         expect(result.name).to.equal('default-agent')
         expect(result.mcpServers).to.have.property('testServer')
@@ -717,7 +717,7 @@ describe('convertPersonaToAgent', () => {
         }
         const mcpServers = { testServer: { command: 'test', args: [], env: {} } }
 
-        const result = convertPersonaToAgent(persona, mcpServers, mockAgent)
+        const result = convertPersonaToAgent(persona, mcpServers, mockAgent, mockAgent)
 
         expect(result.allowedTools).to.include('@testServer/tool1')
     })

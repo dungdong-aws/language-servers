@@ -531,10 +531,10 @@ export class McpManager {
     }
 
     public getTrustedCommands() {
-        return this.agentConfig.toolsSettings?.['execute_bash']?.allowList
+        return this.agentConfig.toolsSettings?.['execute_bash']?.allowList ?? []
     }
     public getDenyCommands() {
-        return this.agentConfig.toolsSettings?.['execute_bash']?.denyList
+        return this.agentConfig.toolsSettings?.['execute_bash']?.denyList ?? []
     }
     /**
      * Return a list of all server configurations.
@@ -925,11 +925,13 @@ export class McpManager {
     public async updateServerPermission(serverName: string, perm: MCPServerPermission): Promise<void> {
         try {
             const unsanitizedServerName = this.serverNameMapping.get(serverName) || serverName
-
+            let serverConfig: MCPServerConfig | undefined
             // Get server config
-            const serverConfig = this.mcpServers.get(serverName)
-            if (!serverConfig) {
-                throw new Error(`Server '${serverName}' not found`)
+            if (serverName !== 'Built-in') {
+                serverConfig = this.mcpServers.get(serverName)
+                if (!serverConfig) {
+                    throw new Error(`Server '${serverName}' not found`)
+                }
             }
 
             const serverPrefix = `@${unsanitizedServerName}`
@@ -1067,7 +1069,7 @@ export class McpManager {
                 )
                 const isDenyListChange = isChange(
                     this.agentConfig.toolsSettings['execute_bash'].denyList,
-                    perm.trustedCommands!
+                    perm.deniedCommands!
                 )
 
                 if (isAllowListChange) this.agentConfig.toolsSettings['execute_bash'].allowList = perm.trustedCommands

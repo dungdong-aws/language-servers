@@ -176,7 +176,7 @@ export class McpEventHandler {
             const hasValidationErrors = serversWithErrors.has(serverName)
             const item: DetailedListItem = {
                 title: serverName,
-                description: `Command: ${config.command}`,
+                description: serverName !== 'Built-in' ? `Command: ${config.command}` : '',
                 children: [
                     {
                         groupName: 'serverInformation',
