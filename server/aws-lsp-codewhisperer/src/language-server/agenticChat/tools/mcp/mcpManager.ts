@@ -664,13 +664,7 @@ export class McpManager {
             }
 
             // Save agent config once with all changes
-            await saveAgentConfig(
-                this.features.workspace,
-                this.features.logging,
-                this.agentConfig,
-                agentPath,
-                serverName
-            )
+            await saveAgentConfig(this.features.workspace, this.features.logging, this.agentConfig, agentPath)
 
             // Add server tools to tools list after initialization
             await this.initOneServer(sanitizedName, newCfg)
@@ -734,13 +728,7 @@ export class McpManager {
             })
 
             // Save agent config
-            await saveAgentConfig(
-                this.features.workspace,
-                this.features.logging,
-                this.agentConfig,
-                cfg.__configPath__,
-                unsanitizedName
-            )
+            await saveAgentConfig(this.features.workspace, this.features.logging, this.agentConfig, cfg.__configPath__)
 
             // Get all config paths and delete the server from each one
             const wsUris = this.features.workspace.getAllWorkspaceFolders()?.map(f => f.uri) ?? []
@@ -823,13 +811,7 @@ export class McpManager {
                 this.agentConfig.mcpServers[unsanitizedServerName] = updatedConfig
 
                 // Save agent config
-                await saveAgentConfig(
-                    this.features.workspace,
-                    this.features.logging,
-                    this.agentConfig,
-                    agentPath,
-                    unsanitizedServerName
-                )
+                await saveAgentConfig(this.features.workspace, this.features.logging, this.agentConfig, agentPath)
             }
 
             const newCfg: MCPServerConfig = {
@@ -1079,13 +1061,7 @@ export class McpManager {
             // Save agent config
             const agentPath = perm.__configPath__
             if (agentPath) {
-                await saveAgentConfig(
-                    this.features.workspace,
-                    this.features.logging,
-                    this.agentConfig,
-                    agentPath,
-                    unsanitizedServerName
-                )
+                await saveAgentConfig(this.features.workspace, this.features.logging, this.agentConfig, agentPath)
             }
 
             // Update mcpServerPermissions map
@@ -1094,17 +1070,19 @@ export class McpManager {
                 toolPerms: perm.toolPerms || {},
             })
 
-            // enable/disable server
-            if (this.isServerDisabled(serverName)) {
-                const client = this.clients.get(serverName)
-                if (client) {
-                    await client.close()
-                    this.clients.delete(serverName)
-                }
-                this.setState(serverName, McpServerStatus.DISABLED, 0)
-            } else {
-                if (!this.clients.has(serverName)) {
-                    await this.initOneServer(serverName, this.mcpServers.get(serverName)!)
+            // enable/disable server, exclude built-in tools
+            if (serverName !== 'Built-in') {
+                if (this.isServerDisabled(serverName)) {
+                    const client = this.clients.get(serverName)
+                    if (client) {
+                        await client.close()
+                        this.clients.delete(serverName)
+                    }
+                    this.setState(serverName, McpServerStatus.DISABLED, 0)
+                } else {
+                    if (!this.clients.has(serverName)) {
+                        await this.initOneServer(serverName, this.mcpServers.get(serverName)!)
+                    }
                 }
             }
 
@@ -1196,8 +1174,7 @@ export class McpManager {
                     this.features.workspace,
                     this.features.logging,
                     this.agentConfig,
-                    cfg.__configPath__,
-                    unsanitizedName
+                    cfg.__configPath__
                 )
             }
         } catch (err) {
