@@ -1809,18 +1809,21 @@ export class AgenticChatController implements ChatHandlers {
                         // Get the approved paths from the session
                         const approvedPaths = session.approvedPaths
 
+                        // Get list of allowed commands
+                        const allowList = new Set(McpManager.instance.getTrustedCommands())
                         // Pass the approved paths to the tool's requiresAcceptance method
+
                         const { requiresAcceptance, warning, commandCategory } = await tool.requiresAcceptance(
                             toolUse.input as any,
-                            approvedPaths
+                            approvedPaths,
+                            toolUse.name === EXECUTE_BASH ? allowList : undefined
                         )
 
                         finalCommandCategory = commandCategory
 
                         const isExecuteBash = toolUse.name === EXECUTE_BASH
 
-                        const allowList = McpManager.instance.getTrustedCommands()
-                        const denyList = McpManager.instance.getDenyCommands()
+                        // const denyList = McpManager.instance.getDenyCommands()
 
                         // check if tool execution's path is out of workspace
                         const isOutOfWorkSpace = warning === OUT_OF_WORKSPACE_WARNING_MSG

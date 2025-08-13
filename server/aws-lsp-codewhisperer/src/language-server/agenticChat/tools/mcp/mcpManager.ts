@@ -530,10 +530,10 @@ export class McpManager {
         return this.agentConfig.allowedTools.includes(toolId) ? McpPermissionType.alwaysAllow : McpPermissionType.ask
     }
 
-    public getTrustedCommands() {
+    public getTrustedCommands(): string[] {
         return this.agentConfig.toolsSettings?.['execute_bash']?.allowList ?? []
     }
-    public getDenyCommands() {
+    public getDenyCommands(): string[] {
         return this.agentConfig.toolsSettings?.['execute_bash']?.denyList ?? []
     }
     /**

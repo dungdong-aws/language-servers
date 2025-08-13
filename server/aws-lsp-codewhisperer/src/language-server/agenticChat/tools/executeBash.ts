@@ -179,7 +179,8 @@ export class ExecuteBash {
 
     public async requiresAcceptance(
         params: ExecuteBashParams,
-        approvedPaths?: Set<string>
+        approvedPaths?: Set<string>,
+        allowList?: Set<string>
     ): Promise<CommandValidation> {
         try {
             const args = split(params.command)
@@ -210,6 +211,7 @@ export class ExecuteBash {
 
             // Track highest command category (ReadOnly < Mutate < Destructive)
             let highestCommandCategory = CommandCategory.ReadOnly
+            let isCommandsAllowed = true
 
             for (const cmdArgs of allCommands) {
                 if (cmdArgs.length === 0) {
@@ -283,6 +285,7 @@ export class ExecuteBash {
                 }
 
                 const command = cmdArgs[0]
+                isCommandsAllowed = isCommandsAllowed && allowList!.has(command)
                 const category = commandCategories.get(command)
 
                 // Update the highest command category if current command has higher risk
@@ -311,6 +314,9 @@ export class ExecuteBash {
                     case CommandCategory.ReadOnly:
                         continue
                     default:
+                        if (isCommandsAllowed) {
+                            return { requiresAcceptance: false, commandCategory: highestCommandCategory }
+                        }
                         return {
                             requiresAcceptance: true,
                             commandCategory: highestCommandCategory,
