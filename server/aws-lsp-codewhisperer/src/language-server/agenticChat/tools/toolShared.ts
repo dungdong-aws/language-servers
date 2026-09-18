@@ -1,6 +1,7 @@
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
 import { workspaceUtils } from '@aws/lsp-core'
 import { getWorkspaceFolderPaths } from '@aws/lsp-core/out/util/workspaceUtils'
+import { sanitize } from '@aws/lsp-core/out/util/path'
 import * as fs from 'fs'
 import * as path from 'path'
 import { CommandCategory } from './executeBash'
@@ -60,6 +61,17 @@ export async function resolveSymlinkAwarePath(inputPath: string): Promise<string
             return current
         }
     }
+}
+
+/**
+ * Resolve an input path to the single canonical on-disk location a read, write,
+ * or list should act on: `sanitize()` (expand `~`, make absolute) followed by
+ * `resolveSymlinkAwarePath()` (follow symlinks at every segment). Tools call
+ * this once and act on the returned value so the workspace-boundary decision
+ * and the operation itself cannot resolve to different targets.
+ */
+export async function resolveCanonicalPath(inputPath: string): Promise<string> {
+    return resolveSymlinkAwarePath(sanitize(inputPath))
 }
 
 /**
@@ -202,15 +214,12 @@ export async function requiresPathAcceptance(
     approvedPaths?: Map<string, Set<string>>
 ): Promise<CommandValidation> {
     try {
-        // Canonicalize the path in a symlink-aware way before the
-        // workspace-boundary check. This resolves symlinks at every segment,
-        // including a symlink at the leaf whose target does not exist yet
-        // (a "dangling" symlink). A string-only resolve, or an fs.realpath
-        // that silently falls back to the literal link name when the target
-        // is missing, would treat such a link as in-workspace based on its
-        // name alone even though a write or read through it would land
-        // outside the workspace.
-        const canonicalPath = await resolveSymlinkAwarePath(inputPath)
+        // Canonicalize in a symlink-aware way before the workspace-boundary
+        // check: a link whose name sits inside the workspace can point outside
+        // it, including when the target does not exist yet (a dangling link).
+        // The I/O tools resolve via the same helper and operate on that value,
+        // so the boundary decision and the operation share one resolved path.
+        const canonicalPath = await resolveCanonicalPath(inputPath)
 
         // Then check if the path is already approved for this specific tool
         if (isPathApproved(canonicalPath, toolName, approvedPaths)) {
