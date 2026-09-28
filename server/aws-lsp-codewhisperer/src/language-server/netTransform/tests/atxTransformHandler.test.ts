@@ -38,6 +38,82 @@ describe('ATXTransformHandler - Chat APIs', () => {
         sinon.restore()
     })
 
+    // The beam artifact cache had no tests at all, and the LRU-victim case below is exactly the bug
+    // the cap-correction commit fixed — nothing guarded the regression.
+    describe('downloadJsonArtifact cache', () => {
+        let urlStub: sinon.SinonStub
+
+        beforeEach(() => {
+            urlStub = sinon.stub(handler as any, 'createArtifactDownloadUrl')
+        })
+
+        it('caches a NEGATIVE (not JSON) so the artifact is never re-fetched', async () => {
+            // Negatives were 1230 of the 1980 wasted fetches — the bulk of the win — and "these
+            // bytes are not JSON" is a permanent property, so it must not expire.
+            ;(handler as any).beamJsonArtifactCache.set('a1', {
+                value: null,
+                expiresAt: Number.MAX_SAFE_INTEGER,
+            })
+
+            const result = await (handler as any).downloadJsonArtifact('ws', 'job', 'a1')
+
+            expect(result).to.equal(null)
+            expect(urlStub.called).to.be.false
+        })
+
+        it('serves a fresh POSITIVE from cache without re-fetching', async () => {
+            ;(handler as any).beamJsonArtifactCache.set('a2', {
+                value: { repos: ['alice'] },
+                expiresAt: Date.now() + 60_000,
+            })
+
+            const result = await (handler as any).downloadJsonArtifact('ws', 'job', 'a2')
+
+            expect(result).to.deep.equal({ repos: ['alice'] })
+            expect(urlStub.called).to.be.false
+        })
+
+        it('RE-FETCHES an expired positive — a rewritten beam-map must not be pinned', async () => {
+            // Why positives carry a TTL: web-orc re-writes the beam-map, and if a rewrite reuses the
+            // artifactId a permanent cache would hide every repo beamed after the first one until
+            // the LSP restarted.
+            ;(handler as any).beamJsonArtifactCache.set('a3', {
+                value: { repos: ['alice'] },
+                expiresAt: Date.now() - 1,
+            })
+            urlStub.resolves(null) // no presigned URL — proves only that the fetch was ATTEMPTED
+
+            const result = await (handler as any).downloadJsonArtifact('ws', 'job', 'a3')
+
+            expect(urlStub.calledOnce).to.be.true
+            expect(result).to.equal(null)
+        })
+
+        it('does NOT cache a missing presigned URL — that is transient', async () => {
+            urlStub.resolves(null)
+
+            await (handler as any).downloadJsonArtifact('ws', 'job', 'a4')
+            await (handler as any).downloadJsonArtifact('ws', 'job', 'a4')
+
+            expect(urlStub.calledTwice).to.be.true
+            expect((handler as any).beamJsonArtifactCache.has('a4')).to.be.false
+        })
+
+        it('evicts the least-recently-USED entry, not the oldest inserted', async () => {
+            // Guards the cap-correction commit: a hit must refresh recency. Without the
+            // delete+re-insert on read, Map insertion order makes this evict 'first' — the entry
+            // just used — which is how an under-sized cap collapsed the hit rate to zero.
+            const cache = (handler as any).beamJsonArtifactCache
+            cache.set('first', { value: null, expiresAt: Number.MAX_SAFE_INTEGER })
+            cache.set('second', { value: null, expiresAt: Number.MAX_SAFE_INTEGER })
+
+            // Touch 'first' so it becomes most-recently-used.
+            await (handler as any).downloadJsonArtifact('ws', 'job', 'first')
+
+            expect(Array.from(cache.keys())).to.deep.equal(['second', 'first'])
+        })
+    })
+
     describe('sendMessage', () => {
         it('should send message and return response without polling', async () => {
             const mockResponse = {
@@ -51,7 +127,17 @@ describe('ATXTransformHandler - Chat APIs', () => {
                 skipPolling: true,
             })
 
-            expect(result).to.deep.equal({ success: true, data: mockResponse })
+            // skipPolling must return the SAME shape as the polling path, not the raw send result.
+            // The IDE reads data.sentMessage.messageId to seed its seen-set so the 3s chat poll does
+            // not render the server's copy as a second bubble; returning `mockResponse` verbatim
+            // left that unreadable and every beamed message appeared twice.
+            expect(result).to.deep.equal({
+                success: true,
+                data: { sentMessage: mockResponse.message, response: null },
+            })
+            // Assert the consumed path explicitly — deep.equal above would still pass if the field
+            // were renamed on both sides, but the IDE reads exactly this.
+            expect(result.data.sentMessage.messageId).to.equal('msg-123')
             expect(sendStub.calledOnce).to.be.true
         })
 
@@ -4430,5 +4516,61 @@ describe('ATXTransformHandler - Beam to IDE', () => {
             const result = await handler.downloadBeamArtifact('ws-1', 'job-1', 'art-1', '')
             expect(result.Success).to.be.false
         })
+    })
+})
+
+describe('ATXTransformHandler - isRepoLbvOpen: repo node terminal with no LBV child', () => {
+    // Both directions are asserted deliberately. The gate here reads correctly either way, so a
+    // one-sided test cannot tell a working gate from an unreachable one: removing the branch and
+    // inverting it produce different failures, and only covering both catches both.
+    let handler: ATXTransformHandler
+
+    const planWith = (repoStatus: string, lbvChild?: { StepName: string; Status: string }) => ({
+        StepName: 'root',
+        Status: 'IN_PROGRESS',
+        Children: [
+            {
+                StepName: 'alice (beamed)',
+                Status: repoStatus,
+                Children: lbvChild ? [lbvChild] : [],
+            },
+        ],
+    })
+
+    const isOpen = (plan: any) => (handler as any).isRepoLbvOpen(plan, 'alice', 'job-1') as boolean
+
+    beforeEach(() => {
+        handler = new ATXTransformHandler(
+            sinon.createStubInstance(AtxTokenServiceManager) as any,
+            {} as Workspace,
+            { log: sinon.stub(), error: sinon.stub() } as any,
+            {} as Runtime
+        )
+    })
+
+    afterEach(() => sinon.restore())
+
+    it('CLOSED when the repo node is terminal and has no LBV child — a reaped beam must drop off', () => {
+        // Fails if the branch is removed: without it this returns the default OPEN and the repo
+        // sits in the Transferred list forever with a disabled Load button.
+        expect(isOpen(planWith('STOPPED'))).to.be.false
+    })
+
+    it('CLOSED on a cancelled repo node with no LBV child', () => {
+        expect(isOpen(planWith('CANCELLED'))).to.be.false
+    })
+
+    it('OPEN when the repo node is still live and has no LBV child — a fresh transfer must stay', () => {
+        // Fails if the branch fires on the wrong side: over-gating here hides every repo whose
+        // sub-agent has not yet created its HITL, which is the normal state right after a beam.
+        expect(isOpen(planWith('IN_PROGRESS'))).to.be.true
+    })
+
+    it('still defers to the LBV child when one exists, terminal repo node notwithstanding', () => {
+        // The new branch must not shadow the original signal: with an LBV child present its status
+        // decides, so a repo whose build is still running stays visible even if the parent node has
+        // been marked terminal early.
+        const plan = planWith('SUCCEEDED', { StepName: 'Local Build Verification', Status: 'IN_PROGRESS' })
+        expect(isOpen(plan)).to.be.true
     })
 })
