@@ -4,6 +4,7 @@ import * as archiver from 'archiver'
 import got from 'got'
 import * as path from 'path'
 import * as crypto from 'crypto'
+import { pipeline } from 'stream/promises'
 import { NodeHttpHandler } from '@smithy/node-http-handler'
 import AdmZip = require('adm-zip')
 import { ArtifactManager } from './artifactManager'
@@ -115,6 +116,29 @@ interface BeamedRepoInfo {
 // Bounds for the beam-map candidate scan (serial download+parse per candidate).
 const BEAM_MAP_SCAN_MAX_CANDIDATES = 25
 const BEAM_MAP_SCAN_BUDGET_MS = 15000
+// How long to stop starting optional beam-map scans after FES throttles us. Deliberately longer than
+// the 30s dashboard/info-bar poll interval: a cooldown shorter than the poll would merely delay calls
+// within one sweep instead of dropping whole sweeps, which is the only thing that reduces our rate.
+const BEAM_THROTTLE_COOLDOWN_MS = 90000
+// Cap on the parsed-artifact cache. The two bounds above limit ONE scan; they cannot
+// limit the number of scans, so repeated discovery sweeps re-downloaded the same
+// artifacts indefinitely. The cache is what bounds the total.
+//
+// 4000 is derived from a measurement, not chosen: a 25-minute session on a 32-job
+// workspace touched 1043 DISTINCT artifacts while issuing ~30000 downloads (~29x
+// redundancy). An earlier value of 500 sat BELOW that working set, so the cache filled,
+// evicted, and refilled continuously — 36 evictions in 25 minutes — and the flood did
+// not move at all. The cap must exceed the working set or the cache is worse than
+// useless: it pays the bookkeeping and delivers no hits.
+const BEAM_JSON_ARTIFACT_CACHE_MAX = 4000
+
+// How long a PARSED artifact stays cached. Negatives ("not JSON") never expire — that is a property
+// of the bytes — but a positive can be rewritten under the same artifactId (web-orc re-writes the
+// beam-map), so pinning one for the session would hide a repo beamed later. 60s is far longer than
+// the ~13s sweep cadence, so it still collapses the repeated fetches this cache exists to stop,
+// while bounding staleness to one minute. It also bounds RETENTION: parsed values are arbitrary
+// size, so a TTL keeps customer artifact content from living in the LSP for the whole session.
+const BEAM_JSON_POSITIVE_TTL_MS = 60_000
 
 /**
  * ATX Transform Handler - Business logic for ATX FES Transform operations
@@ -141,6 +165,35 @@ export class ATXTransformHandler {
     // pre-job mode-selection -checkpoint (filter) from the post-build -checkpoint
     // (surface for auto-approve).
     private jobsPastLocalBuild: Set<string> = new Set()
+
+    // Beam: parsed small-JSON artifacts keyed by artifactId. A `null` value is a positive result
+    // meaning "these bytes are definitively not JSON" — the case that dominated the waste, and the
+    // only one cached indefinitely. Parsed values carry an expiry because the same id CAN be
+    // rewritten (see downloadJsonArtifact for why immutability is not assumed). Transient failures
+    // — no presigned URL — are never cached at all.
+    private readonly beamJsonArtifactCache = new Map<string, { value: any | null; expiresAt: number }>()
+    // Latch so the cap-reached notice is logged once per process, not once per eviction.
+    private beamJsonArtifactCacheEvicted = false
+
+    // Process-wide throttle cooldown. The per-call retry in createArtifactDownloadUrl is resilience
+    // for ONE call and does not reduce our rate — under sustained throttling it raises it, because a
+    // rejected call becomes up to four. Nothing currently tells the client to stop STARTING work.
+    // That is the gap behind an alarm that has fired five times in 2026 without resolution: each
+    // round produced a local "make this cheaper" fix while the client kept initiating at the same
+    // rate no matter how hard the service pushed back.
+    //
+    // So: any throttle sets a cooldown, and the optional beam-map scan — the only unbounded-ish
+    // fan-out we own — skips while it is in force. Deliberately longer than the 30s poll interval so
+    // it actually drops sweeps rather than merely delaying calls within one.
+    //
+    // Skipping is SAFE and not a feature regression: the beam-map is optional enrichment. When it is
+    // absent, discovery already derives beamed repos from beam-status artifacts (observed live:
+    // "no beam-map for job=… — derived 1 beamed repo(s) from beam-status artifacts"), and
+    // isRepoLbvOpen defaults to OPEN on a fetch failure so nothing is ever wrongly hidden. A
+    // throttled sweep therefore degrades to the path that already works, and the next uncooled sweep
+    // picks the beam-map up.
+    private beamThrottleCooldownUntilMs = 0
+    private beamThrottleCooldownLogged = false
 
     constructor(serviceManager: AtxTokenServiceManager, workspace: Workspace, logging: Logging, runtime: Runtime) {
         this.serviceManager = serviceManager
@@ -686,7 +739,23 @@ export class ATXTransformHandler {
             // job (logs, metadata) could otherwise stall the IDE's discovery UI. Cap the number
             // scanned and enforce an overall deadline; the beam-map is written early and is
             // small, so a bounded scan reliably finds it.
-            const candidates = allCandidates.slice(0, BEAM_MAP_SCAN_MAX_CANDIDATES)
+            // Throttle cooldown: skip the optional scan rather than adding to the pressure. The
+            // existing per-call retry only rescues a single call; this is what stops us STARTING more
+            // work while the service is rejecting us.
+            //
+            // Empty the candidate list rather than returning early — an early return would abandon
+            // the whole of listBeamedRepos, including the beam-status discovery below, and the Beamed
+            // tab would go empty for the duration of the cooldown. Emptying skips only the optional
+            // enrichment and lets the path that actually finds beamed repos run untouched.
+            const beamThrottleCoolingDown = this.isBeamThrottleCooldownActive()
+            if (beamThrottleCoolingDown) {
+                this.logging.log(
+                    `[BEAM-PKG] beam-map scan: SKIPPED — throttle cooldown active for another ` +
+                        `${Math.max(0, this.beamThrottleCooldownUntilMs - Date.now())}ms. ` +
+                        `Beam-status discovery continues; the beam-map is optional enrichment.`
+                )
+            }
+            const candidates = beamThrottleCoolingDown ? [] : allCandidates.slice(0, BEAM_MAP_SCAN_MAX_CANDIDATES)
             if (allCandidates.length > candidates.length) {
                 this.logging.log(
                     `[BEAM-PKG] beam-map scan: capping ${allCandidates.length} candidate(s) to ${candidates.length}`
@@ -778,7 +847,7 @@ export class ATXTransformHandler {
                             `[BEAM-PKG] beam-map repo '${nr.RepositoryName}': no transformed zip matched — falling back to beam-map artifactId ${nr.BeamArtifactId} (may not be downloadable)`
                         )
                     }
-                    const lbvOpen = planRoot ? this.isRepoLbvOpen(planRoot, nr.RepositoryName) : true
+                    const lbvOpen = planRoot ? this.isRepoLbvOpen(planRoot, nr.RepositoryName, parentJobId) : true
                     const lbvPending = planRoot ? this.isRepoLbvHitlPending(planRoot, nr.RepositoryName) : true
                     beamed.push({
                         RepositoryName: nr.RepositoryName,
@@ -790,7 +859,7 @@ export class ATXTransformHandler {
                         IsLbvPending: lbvPending,
                     })
                     this.logging.log(
-                        `[BEAM-PKG] beamed repo (from beam-map) | repo=${nr.RepositoryName} artifact=${artifactId} stepId=${nr.BeamStepId || '<empty>'} scenario=${nr.BeamScenario || 'transformed'} lbvOpen=${lbvOpen} lbvPending=${lbvPending}`
+                        `[BEAM-PKG] beamed repo (from beam-map) | job=${parentJobId} repo=${nr.RepositoryName} artifact=${artifactId} stepId=${nr.BeamStepId || '<empty>'} scenario=${nr.BeamScenario || 'transformed'} lbvOpen=${lbvOpen} lbvPending=${lbvPending}`
                     )
                 }
             } else {
@@ -834,7 +903,7 @@ export class ATXTransformHandler {
                             )
                             continue
                         }
-                        const lbvOpen = planRoot ? this.isRepoLbvOpen(planRoot, repoName) : true
+                        const lbvOpen = planRoot ? this.isRepoLbvOpen(planRoot, repoName, parentJobId) : true
                         const lbvPending = planRoot ? this.isRepoLbvHitlPending(planRoot, repoName) : true
                         beamed.push({
                             RepositoryName: repoName,
@@ -846,7 +915,7 @@ export class ATXTransformHandler {
                             IsLbvPending: lbvPending,
                         })
                         this.logging.log(
-                            `[BEAM-PKG] beamed repo (from beam-status) | repo=${repoName} artifact=${zip.artifactId} path=${zip.path} lbvOpen=${lbvOpen} lbvPending=${lbvPending}`
+                            `[BEAM-PKG] beamed repo (from beam-status) | job=${parentJobId} repo=${repoName} artifact=${zip.artifactId} path=${zip.path} lbvOpen=${lbvOpen} lbvPending=${lbvPending}`
                         )
                     }
                     this.logging.log(
@@ -927,9 +996,59 @@ export class ATXTransformHandler {
      * "Unexpected token 'P'"). So: fetch as a buffer, try JSON.parse first, and on
      * failure unzip (AdmZip) and parse the first JSON entry inside.
      */
+    /**
+     * Record that FES pushed back. Set on every throttle, retried or not — the signal is "we are
+     * being rejected", which is equally true on the first attempt and the last.
+     */
+    private noteBeamThrottled(): void {
+        this.beamThrottleCooldownUntilMs = Date.now() + BEAM_THROTTLE_COOLDOWN_MS
+        if (!this.beamThrottleCooldownLogged) {
+            this.beamThrottleCooldownLogged = true
+            this.logging.log(
+                `[BEAM-PKG] FES throttled us — pausing the optional beam-map scan for ` +
+                    `${BEAM_THROTTLE_COOLDOWN_MS}ms after each throttle. Logged once per process.`
+            )
+        }
+    }
+
+    private isBeamThrottleCooldownActive(): boolean {
+        return Date.now() < this.beamThrottleCooldownUntilMs
+    }
+
     private async downloadJsonArtifact(workspaceId: string, jobId: string, artifactId: string): Promise<any | null> {
+        // Beam discovery re-scans the same candidate artifacts on every sweep, so without a cache
+        // the same artifact is downloaded and re-parsed on every pass (measured: ~2000 download-URL
+        // creations and 1230 repeated "not JSON" parses in 90s, which provoked AccessDenied on
+        // unrelated calls — chat included).
+        //
+        // Deliberately NOT relying on artifacts being immutable. An earlier version did, on the
+        // assumption that a re-upload mints a new artifactId — but this file's own comments record
+        // web-orc RE-WRITING the beam-map (see the beam-map notes above: "re-written on each beam;
+        // latest wins", and the BeamArtifactId "thrash" that forced the beam-status fallback). If a
+        // rewrite reuses the id, a permanent positive cache would pin the FIRST beam-map for the
+        // whole LSP session, so a repo beamed later never appears in the panel until restart, and a
+        // re-beam would leave chat routed at a dead stepId.
+        //
+        // So: NEGATIVES are cached permanently (an artifact that is not JSON does not become JSON,
+        // and negatives were 1230 of the 1980 wasted fetches — the bulk of the win), while POSITIVES
+        // get a short TTL. Positives are a handful per job, so re-fetching one every TTL is cheap,
+        // and it removes the dependency on platform semantics we have not verified.
+        const hit = this.beamJsonArtifactCache.get(artifactId)
+        if (hit && Date.now() < hit.expiresAt) {
+            // Re-insert to move this entry to the end: Map iterates in insertion order, so
+            // "oldest key first" is only a true LRU ordering if a hit refreshes position.
+            this.beamJsonArtifactCache.delete(artifactId)
+            this.beamJsonArtifactCache.set(artifactId, hit)
+            return hit.value
+        }
+        if (hit) {
+            // Expired positive — drop it so the fetch below refreshes it.
+            this.beamJsonArtifactCache.delete(artifactId)
+        }
         try {
             const dl = await this.createArtifactDownloadUrl(workspaceId, jobId, artifactId)
+            // No presigned URL is a transient condition (throttle/authz), so it is NOT
+            // cached — the next sweep must be free to retry.
             if (!dl?.s3PresignedUrl) return null
             const response = await got.get(dl.s3PresignedUrl, {
                 headers: dl.requestHeaders || {},
@@ -940,7 +1059,9 @@ export class ATXTransformHandler {
 
             // Direct JSON first (artifact stored raw).
             try {
-                return JSON.parse(buf.toString('utf8'))
+                const parsed = JSON.parse(buf.toString('utf8'))
+                this.cacheJsonArtifact(artifactId, parsed)
+                return parsed
             } catch {
                 // Not raw JSON — likely a ZIP (PK magic). Unzip and parse the first
                 // JSON entry (the beam-map is a single JSON file inside).
@@ -953,18 +1074,64 @@ export class ATXTransformHandler {
                             this.logging.log(
                                 `[BEAM-PKG] downloadJsonArtifact: parsed ${artifactId} from zip entry ${entry.entryName}`
                             )
+                            this.cacheJsonArtifact(artifactId, parsed)
                             return parsed
                         } catch {
                             // not this entry — try the next
                         }
                     }
                 }
-                throw new Error('artifact is neither raw JSON nor a zip containing JSON')
+                // Definitively not JSON, and not a zip containing JSON. That is a
+                // PERMANENT property of these bytes, so remember it: this was the bulk
+                // of the waste (1230 repeats in 90s), and it now logs once per artifact
+                // instead of once per sweep.
+                this.logging.log(
+                    `ATX: downloadJsonArtifact: ${artifactId} is neither raw JSON nor a zip containing JSON — caching as not-JSON`
+                )
+                this.cacheJsonArtifact(artifactId, null)
+                return null
             }
         } catch (error) {
+            // TRANSIENT (download/network/throttle/AccessDenied, or a malformed zip that
+            // made AdmZip throw). Deliberately NOT cached — caching one of these would
+            // permanently mark a readable artifact as unreadable.
             this.logging.log(`ATX: downloadJsonArtifact parse/download failed for ${artifactId}: ${String(error)}`)
             return null
         }
+    }
+
+    /**
+     * Record a parsed artifact (or `null` for "definitively not JSON") against its
+     * immutable artifactId, evicting least-recently-used entries at the cap.
+     *
+     * Evicts ONE entry rather than clearing the map. The first version cleared wholesale,
+     * which turns an under-sized cap from a partial loss into a total one: at the cap it
+     * discards every entry including the ones about to be hit, so the hit rate collapses
+     * to zero and the cache does nothing. That is exactly what happened with a cap of 500
+     * against a 1043-artifact working set. Single-victim eviction degrades gradually
+     * instead, so a workspace larger than the cap still gets most of the benefit.
+     */
+    private cacheJsonArtifact(artifactId: string, value: any | null): void {
+        while (this.beamJsonArtifactCache.size >= BEAM_JSON_ARTIFACT_CACHE_MAX) {
+            const oldest = this.beamJsonArtifactCache.keys().next()
+            if (oldest.done) break
+            this.beamJsonArtifactCache.delete(oldest.value)
+            // Logged ONCE, not per eviction — the signal we want is "the working set
+            // exceeded the cap", which is what made the previous under-sized cap
+            // diagnosable. Per-eviction logging would itself become the flood.
+            if (!this.beamJsonArtifactCacheEvicted) {
+                this.beamJsonArtifactCacheEvicted = true
+                this.logging.log(
+                    `[BEAM-PKG] downloadJsonArtifact cache hit its ${BEAM_JSON_ARTIFACT_CACHE_MAX}-entry cap — ` +
+                        `evicting LRU. If this appears, the workspace's artifact working set exceeds the cap ` +
+                        `and the hit rate is degrading; consider raising it.`
+                )
+            }
+        }
+        // value === null means "definitively not JSON" — a permanent property of the bytes, so it
+        // never expires. A parsed positive may be rewritten under the same id, so it does.
+        const expiresAt = value === null ? Number.MAX_SAFE_INTEGER : Date.now() + BEAM_JSON_POSITIVE_TTL_MS
+        this.beamJsonArtifactCache.set(artifactId, { value, expiresAt })
     }
 
     /**
@@ -1344,6 +1511,11 @@ export class ATXTransformHandler {
                     name === 'ThrottlingException' ||
                     name === 'TooManyRequestsException' ||
                     /throttl|too many requests|rate exceeded/i.test(msg)
+                if (isThrottle) {
+                    // Record it regardless of whether we retry: the signal is "the service is
+                    // pushing back", which is true on the last attempt as much as the first.
+                    this.noteBeamThrottled()
+                }
                 if (isThrottle && attempt < maxAttempts) {
                     // Exponential base (250, 500, 1000ms) with jitter: under concurrent
                     // throttling, unjittered lockstep retries amplify the thundering herd that
@@ -2381,25 +2553,43 @@ export class ATXTransformHandler {
      * name, then inspect its LBV descendant: OPEN = the LBV node exists and is non-terminal
      * (PENDING_HUMAN_INPUT / IN_PROGRESS / NOT_STARTED); CLOSED = terminal (SUCCEEDED / COMPLETED /
      * FAILED / STOPPED). Returns TRUE (open) when we can't resolve it — no plan yet, node not
-     * found, or no LBV child — so a freshly transferred repo is never hidden before its LBV status
-     * is known (the IDE mirrors this default). The caller skips this call entirely when no plan is
-     * available.
+     * found, or no LBV child on a still-live repo node — so a freshly transferred repo is never
+     * hidden before its LBV status is known (the IDE mirrors this default). The one exception is a
+     * repo node that is itself terminal with no LBV child: that beam ended without ever opening
+     * LBV, so it is CLOSED rather than forever-pending. The caller skips this call entirely when no
+     * plan is available.
      */
-    private isRepoLbvOpen(planRoot: AtxPlanStep, repoName: string): boolean {
+    private isRepoLbvOpen(planRoot: AtxPlanStep, repoName: string, jobId: string): boolean {
         const repoNode = this.findBeamedRepoNode(planRoot, repoName)
         if (!repoNode) {
             // unknown → default open (don't hide a fresh transfer)
             this.logging.log(
-                `[BEAM-LBVOPEN] repo='${repoName}' → OPEN (default): no beamed repo node found in plan tree`
+                `[BEAM-LBVOPEN] job=${jobId} repo='${repoName}' → OPEN (default): no beamed repo node found in plan tree`
             )
             return true
         }
 
         const lbvNode = this.findLbvNode(repoNode)
         if (!lbvNode) {
+            // No LBV child. Two very different states look identical here: a fresh transfer whose
+            // sub-agent hasn't created the HITL YET, and a beam whose sub-agent never booted and was
+            // reaped by the web orchestrator's spawn-gap recovery (which stops the instance and marks
+            // this repo node terminal). Only the repo node's own status separates them — so read it
+            // before defaulting to open, or a reaped repo sits in the Transferred list forever with a
+            // disabled Load button and no explanation (its re-beam notice goes to the job owner, not
+            // to whoever is waiting in the IDE). Safe on re-beam: the orchestrator re-drives this
+            // node to IN_PROGRESS before reusing it, so a re-beamed repo reads live again.
+            if (this.isTerminalStepStatus(repoNode.Status)) {
+                this.logging.log(
+                    `[BEAM-LBVOPEN] job=${jobId} repo='${repoName}' node='${repoNode.StepName}' ` +
+                        `repoStatus=${repoNode.Status} → CLOSED: no Local Build Verification child and the repo node is ` +
+                        `terminal, so the beam ended without ever opening LBV (spawn-gap reap or cancel)`
+                )
+                return false
+            }
             // no LBV node yet → still pending
             this.logging.log(
-                `[BEAM-LBVOPEN] repo='${repoName}' → OPEN (default): repo node '${repoNode.StepName}' has no Local Build Verification child yet`
+                `[BEAM-LBVOPEN] job=${jobId} repo='${repoName}' → OPEN (default): repo node '${repoNode.StepName}' has no Local Build Verification child yet`
             )
             return true
         }
@@ -2409,7 +2599,7 @@ export class ATXTransformHandler {
         // is how we PROVE the show-set actually flips: watch a repo go lbvStatus=IN_PROGRESS/
         // PENDING_HUMAN_INPUT (OPEN) → SUCCEEDED (CLOSED) after Load, and confirm it then drops off.
         this.logging.log(
-            `[BEAM-LBVOPEN] repo='${repoName}' node='${repoNode.StepName}' lbvNode='${lbvNode.StepName}' ` +
+            `[BEAM-LBVOPEN] job=${jobId} repo='${repoName}' node='${repoNode.StepName}' lbvNode='${lbvNode.StepName}' ` +
                 `lbvStatus=${lbvNode.Status} terminal=${terminal} → ${terminal ? 'CLOSED (will be hidden)' : 'OPEN (will show)'}`
         )
         return !terminal
@@ -2438,28 +2628,71 @@ export class ATXTransformHandler {
      * jobs that name the beam node just "<repo>") if no "(beamed)" node exists anywhere.
      */
     private findBeamedRepoNode(step: AtxPlanStep, repoName: string): AtxPlanStep | null {
-        const beamed = this.findNodeByName(step, `${repoName} (beamed)`.toLowerCase())
+        const beamed = this.pickLiveNode(this.findAllNodesByName(step, `${repoName} (beamed)`.toLowerCase()))
         if (beamed) return beamed
-        return this.findNodeByName(step, repoName.toLowerCase())
+        return this.pickLiveNode(this.findAllNodesByName(step, repoName.toLowerCase()))
     }
 
-    private findNodeByName(step: AtxPlanStep, lowerName: string): AtxPlanStep | null {
-        if ((step.StepName || '').toLowerCase() === lowerName) return step
-        for (const child of step.Children) {
-            const found = this.findNodeByName(child, lowerName)
-            if (found) return found
+    /**
+     * ALL name matches in DFS order, not just the first. Re-beam makes duplicates real: web-orc
+     * mints a fresh beam-batch parent per batch, so a repo beamed twice has TWO "<repo> (beamed)"
+     * nodes, and runtime RECREATES the LBV child rather than reviving the terminal one (only
+     * non-terminal children are reused). A first-match walk then resolves to the DEAD node, the
+     * repo reports lbvOpen=false, and a successful re-beam never reappears in the Beamed tab.
+     * A matched node's own subtree is not searched, matching the previous first-match semantics.
+     */
+    private findAllNodesByName(step: AtxPlanStep, lowerName: string): AtxPlanStep[] {
+        const found: AtxPlanStep[] = []
+        if ((step.StepName || '').toLowerCase() === lowerName) {
+            found.push(step)
+            return found
         }
-        return null
+        for (const child of step.Children) {
+            found.push(...this.findAllNodesByName(child, lowerName))
+        }
+        return found
     }
 
-    /** Find the "Local Build Verification" node anywhere under the given node. */
+    /**
+     * Of several candidate nodes for one repo, pick the LIVE one: the first whose LBV child is
+     * still non-terminal. A candidate with no LBV child yet counts as live — it is pre-terminal,
+     * the same default isRepoLbvOpen applies elsewhere. When every candidate is terminal (all
+     * attempts finished) fall back to the LAST, which is the newest since children are appended.
+     * Non-terminal is the PRIMARY rule precisely so append-order is only ever a tiebreak.
+     */
+    private pickLiveNode(candidates: AtxPlanStep[]): AtxPlanStep | null {
+        if (candidates.length === 0) return null
+        if (candidates.length === 1) return candidates[0]
+        const live = candidates.find(c => {
+            const lbv = this.findLbvNode(c)
+            return lbv ? !this.isTerminalStepStatus(lbv.Status) : true
+        })
+        return live ?? candidates[candidates.length - 1]
+    }
+
+    /**
+     * Find the repo's LIVE "Local Build Verification" node. Prefers a non-terminal node over a
+     * terminal one for the same reason as pickLiveNode: after a re-beam the old STOPPED/FAILED
+     * child and the fresh one sit under the same parent, and a first-match walk picks the dead
+     * one. Falls back to the last (newest) when every attempt is terminal, which is what the
+     * terminal-drop in RebuildBeamedRepos wants to see.
+     */
     private findLbvNode(step: AtxPlanStep): AtxPlanStep | null {
-        if ((step.StepName || '').toLowerCase().includes('local build verification')) return step
-        for (const child of step.Children) {
-            const found = this.findLbvNode(child)
-            if (found) return found
+        const all = this.findAllLbvNodes(step)
+        if (all.length === 0) return null
+        return all.find(n => !this.isTerminalStepStatus(n.Status)) ?? all[all.length - 1]
+    }
+
+    private findAllLbvNodes(step: AtxPlanStep): AtxPlanStep[] {
+        const found: AtxPlanStep[] = []
+        if ((step.StepName || '').toLowerCase().includes('local build verification')) {
+            found.push(step)
+            return found
         }
-        return null
+        for (const child of step.Children) {
+            found.push(...this.findAllLbvNodes(child))
+        }
+        return found
     }
 
     /** Terminal step statuses (LBV done, one way or another). */
@@ -4576,8 +4809,23 @@ export class ATXTransformHandler {
             const sendResult = (await this.atxClient!.send(command)) as any
             const sentMessageId = sendResult?.message?.messageId
 
+            // Join key for correlating a beamed turn across all three packages on one timeline.
+            // The two backends key on different fields — runtime on message_id_sent, web-orc on
+            // msg_len (its send response carries no createdAt) — so emit both names here rather
+            // than forcing either side to translate. beamStep identifies which repo's lane.
+            this.logging.log(
+                `[BEAM-CHAT] sent | message_id_sent=${sentMessageId ?? '<none>'} msg_len=${messageText.length} ` +
+                    `beamStep=${request.beamStepId || '<none>'} job=${request.jobId ?? '<none>'} ` +
+                    `skipPolling=${!!request.skipPolling}`
+            )
+
             if (!sentMessageId || request.skipPolling) {
-                return { success: true, data: sendResult }
+                // Must match the shape the polling path returns below. The client reads the sent id
+                // from data.sentMessage.messageId and adds it to its seen-set so its own poll does
+                // not re-render the message the user just sent. Returning the raw sendResult nests
+                // that id under `message` instead of `sentMessage`, leaving it unreadable — so every
+                // message sent on this path rendered twice: once locally, once again from the poll.
+                return { success: true, data: { sentMessage: sendResult?.message, response: null } }
             }
 
             // Poll for response until the configured attempt ceiling (default 180 x 5s
@@ -4737,26 +4985,57 @@ export class ATXTransformHandler {
         savePath: string,
         artifactName?: string
     ): Promise<{ Success: boolean; FilePath?: string; Error?: string }> {
+        // Tracked outside the try so a mid-download failure can report how far it got
+        // (distinguishes a stalled connection from a never-started one).
+        let downloadedBytes = 0
         try {
             const downloadInfo = await this.createArtifactDownloadUrl(workspaceId, jobId, artifactId)
             if (!downloadInfo) {
-                return { Success: false, Error: 'Failed to get download URL' }
+                const msg = `Failed to get download URL for artifact=${artifactId} (job=${jobId})`
+                this.logging.error(`ATX: downloadArtifactToPath ${msg}`)
+                return { Success: false, Error: msg }
             }
-
-            const response = await got.get(downloadInfo.s3PresignedUrl, {
-                headers: downloadInfo.requestHeaders || {},
-                responseType: 'buffer',
-                timeout: { request: 30000 },
-            })
 
             await Utils.directoryExists(savePath)
             const fileName = artifactName ? path.basename(artifactName) : 'artifact.zip'
             const filePath = path.join(savePath, fileName)
-            fs.writeFileSync(filePath, Buffer.from(response.body))
 
+            // Stream the artifact straight to disk instead of buffering the entire file in memory.
+            // Large artifacts (e.g. Transformation_Report.html) previously failed here: the old
+            // `timeout: { request: 30000 }` caps the WHOLE request — including receiving the full
+            // body — so a large-but-healthy download would abort with a TimeoutError, which was
+            // then swallowed and surfaced to the user as a generic "could not download" error.
+            // `responseType: 'buffer'` also held the full file (plus a copy) in memory. Streaming
+            // with inactivity-based timeouts (time-to-headers + socket idle) removes the size
+            // ceiling while still failing fast on a genuinely stalled connection.
+            this.logging.log(`ATX: downloadArtifactToPath streaming artifact=${artifactId} to ${filePath}`)
+            const downloadStream = got.stream(downloadInfo.s3PresignedUrl, {
+                headers: downloadInfo.requestHeaders || {},
+                timeout: { response: 30000, socket: 60000 },
+            })
+
+            downloadStream.on('downloadProgress', ({ transferred }) => {
+                downloadedBytes = transferred
+            })
+
+            await pipeline(downloadStream, fs.createWriteStream(filePath))
+
+            this.logging.log(`ATX: downloadArtifactToPath completed artifact=${artifactId}, bytes=${downloadedBytes}`)
             return { Success: true, FilePath: savePath }
         } catch (error) {
-            return { Success: false, Error: String(error) }
+            // Log every failure with enough context to diagnose without a repro: the got error
+            // `code` (ETIMEDOUT/ECONNRESET/...), the timeout phase for a TimeoutError, the HTTP
+            // status for an HTTPError, bytes received before the failure, and the full stack.
+            const err = error as any
+            const diagnostics: string[] = []
+            if (err?.code) diagnostics.push(`code=${err.code}`)
+            if (err?.event) diagnostics.push(`timeoutPhase=${err.event}`)
+            if (err?.response?.statusCode) diagnostics.push(`httpStatus=${err.response.statusCode}`)
+            const suffix = diagnostics.length ? ` [${diagnostics.join(', ')}]` : ''
+            this.logging.error(
+                `ATX: downloadArtifactToPath failed artifact=${artifactId} (job=${jobId}) after ${downloadedBytes} bytes: ${String(err?.stack ?? error)}${suffix}`
+            )
+            return { Success: false, Error: `${String(err?.message ?? error)}${suffix}` }
         }
     }
 
