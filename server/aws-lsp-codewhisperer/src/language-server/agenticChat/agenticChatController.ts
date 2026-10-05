@@ -3280,6 +3280,11 @@ export class AgenticChatController implements ChatHandlers {
         builtInPermission?: boolean,
         acceptanceReason?: CommandValidation['acceptanceReason']
     ): ChatResult {
+        // The name used for dispatch and classification is the registered tool
+        // name, which is namespaced for MCP tools. `toolType` carries the
+        // server-supplied original name and is display-only, so it must not be
+        // able to select built-in rendering by matching a built-in name.
+        const dispatchName = toolUse.name
         const toolName = toolType || toolUse.name
         // A multiply linked path is inside the workspace, so the filesystem
         // prompts below describe the shared file rather than a location outside
@@ -3302,7 +3307,7 @@ export class AgenticChatController implements ChatHandlers {
         let body: string | undefined
 
         // Configure tool-specific UI elements
-        switch (toolName) {
+        switch (dispatchName) {
             case EXECUTE_BASH: {
                 const commandString = (toolUse.input as unknown as ExecuteBashParams).command
                 // get feature flag
@@ -3423,7 +3428,7 @@ export class AgenticChatController implements ChatHandlers {
                     buttons,
                 }
 
-                if (toolName === FS_READ) {
+                if (dispatchName === FS_READ) {
                     const paths = (toolUse.input as unknown as FsReadParams).paths
 
                     // Validate paths using our synchronous utility
@@ -3465,7 +3470,7 @@ export class AgenticChatController implements ChatHandlers {
         }
 
         // Determine if this is a built-in tool or MCP tool
-        const isStandardTool = toolName !== undefined && this.#features.agent.getBuiltInToolNames().includes(toolName)
+        const isStandardTool = this.#features.agent.getBuiltInToolNames().includes(dispatchName)
 
         if (isStandardTool) {
             return {
@@ -3474,7 +3479,7 @@ export class AgenticChatController implements ChatHandlers {
                 header,
                 // The warning explains why acceptance is needed, so show it above
                 // the body rather than using it only as a spacing flag.
-                body: warning ? (toolName === EXECUTE_BASH ? '' : warning + '\n\n') + body : body,
+                body: warning ? (dispatchName === EXECUTE_BASH ? '' : warning + '\n\n') + body : body,
             }
         } else {
             return {
