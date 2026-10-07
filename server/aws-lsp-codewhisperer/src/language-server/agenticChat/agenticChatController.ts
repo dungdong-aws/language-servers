@@ -161,6 +161,7 @@ import {
 import { ContextCommandsProvider } from './context/contextCommandsProvider'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError, workspaceUtils } from '@aws/lsp-core'
+import { logFileAccess } from './tools/checkedFileIo'
 import { FsRead, FsReadParams } from './tools/fsRead'
 import { ListDirectory, ListDirectoryParams } from './tools/listDirectory'
 import { FsWrite, FsWriteParams } from './tools/fsWrite'
@@ -169,6 +170,8 @@ import {
     CommandValidation,
     ExplanatoryParams,
     InvokeOutput,
+    discardResolvedTargets,
+    withResolvedTargets,
     resolveSymlinkAwarePath,
     ToolApprovalException,
 } from './tools/toolShared'
@@ -2000,6 +2003,9 @@ export class AgenticChatController implements ChatHandlers {
             let cachedButtonBlockId
             // Set once the user has been asked about this tool use and allowed it.
             let toolApprovalGranted = false
+            // Retain acceptance-check targets for execution and approval caching.
+            let checkedCanonicalPaths: string[] | undefined
+            let executionInput: object | undefined
             if (!toolUse.name || !toolUse.toolUseId) continue
             session.toolUseLookup.set(toolUse.toolUseId, toolUse)
 
@@ -2072,8 +2078,32 @@ export class AgenticChatController implements ChatHandlers {
                         const approvedPaths = session.approvedPaths
 
                         // Pass the approved paths to the tool's requiresAcceptance method
-                        const { requiresAcceptance, warning, commandCategory, acceptanceReason } =
+                        const { requiresAcceptance, warning, commandCategory, acceptanceReason, canonicalPaths } =
                             await tool.requiresAcceptance(toolUse.input as any, approvedPaths)
+
+                        // Filesystem execution requires the canonical targets returned by acceptance.
+                        const isFsTool = [FS_READ, FS_WRITE, FS_REPLACE, FILE_SEARCH, LIST_DIRECTORY].includes(
+                            toolUse.name
+                        )
+                        if (isFsTool) {
+                            logFileAccess(this.#features.logging, 'check.completed', {
+                                toolUseId: toolUse.toolUseId,
+                                toolName: toolUse.name,
+                                canonicalPaths,
+                                requiresAcceptance,
+                            })
+                            if (!canonicalPaths?.length) {
+                                throw new Error(`Could not resolve the path for ${toolUse.name}`)
+                            }
+                            checkedCanonicalPaths = [...canonicalPaths]
+                            // Previews, confirmation and subsequent file references use the checked targets too.
+                            toolUse.input = {
+                                ...(toolUse.input as object),
+                                ...(toolUse.name === FS_READ
+                                    ? { paths: [...canonicalPaths] }
+                                    : { path: canonicalPaths[0] }),
+                            }
+                        }
 
                         // Honor built-in permission if available, otherwise use tool's requiresAcceptance
                         // const requiresAcceptance = builtInPermission || toolRequiresAcceptance
@@ -2123,6 +2153,7 @@ export class AgenticChatController implements ChatHandlers {
                                 )
                             }
                         }
+
                         break
                     }
                     case CodeReview.toolName:
@@ -2246,7 +2277,11 @@ export class AgenticChatController implements ChatHandlers {
                 // asked about, such as a name that a hard link now shares with a
                 // file outside the workspace.
                 const inputPath = (toolUse.input as any)?.path || (toolUse.input as any)?.cwd
-                if (inputPath && toolApprovalGranted) {
+                if (toolApprovalGranted && checkedCanonicalPaths) {
+                    for (const checkedPath of checkedCanonicalPaths) {
+                        session.addApprovedPath(checkedPath, toolUse.name)
+                    }
+                } else if (inputPath && toolApprovalGranted) {
                     session.addApprovedPath(inputPath, toolUse.name)
                     // The acceptance check compares the canonical path, so also
                     // record that form; otherwise an approval never matches when
@@ -2261,7 +2296,30 @@ export class AgenticChatController implements ChatHandlers {
                 }
 
                 const ws = this.#getWritableStream(chatResultStream, toolUse)
-                const result = await this.#features.agent.runTool(toolUse.name, toolUse.input, token, ws)
+                if (checkedCanonicalPaths) {
+                    if (token?.isCancellationRequested) {
+                        throw new CancellationError('user')
+                    }
+                    executionInput = withResolvedTargets(toolUse.input as object, toolUse.name, checkedCanonicalPaths)
+                    logFileAccess(this.#features.logging, 'execution.started', {
+                        toolUseId: toolUse.toolUseId,
+                        toolName: toolUse.name,
+                        canonicalPaths: checkedCanonicalPaths,
+                    })
+                }
+                const result = await this.#features.agent.runTool(
+                    toolUse.name,
+                    executionInput ?? toolUse.input,
+                    token,
+                    ws
+                )
+                if (checkedCanonicalPaths) {
+                    logFileAccess(this.#features.logging, 'execution.completed', {
+                        toolUseId: toolUse.toolUseId,
+                        toolName: toolUse.name,
+                        canonicalPaths: checkedCanonicalPaths,
+                    })
+                }
 
                 let toolResultContent: ToolResultContentBlock
 
@@ -2433,6 +2491,18 @@ export class AgenticChatController implements ChatHandlers {
                     )
                 }
             } catch (err) {
+                if (checkedCanonicalPaths) {
+                    logFileAccess(
+                        this.#features.logging,
+                        'operation.failed',
+                        {
+                            toolUseId: toolUse.toolUseId,
+                            toolName: toolUse.name,
+                            canonicalPaths: checkedCanonicalPaths,
+                        },
+                        err
+                    )
+                }
                 await this.#showUndoAllIfRequired(chatResultStream, session)
                 if (this.isUserAction(err, token)) {
                     // Handle ToolApprovalException for any tool
@@ -2605,6 +2675,10 @@ export class AgenticChatController implements ChatHandlers {
                     status: ToolResultStatus.ERROR,
                     content: [{ json: { error: err instanceof Error ? err.message : 'Unknown error' } }],
                 })
+            } finally {
+                if (executionInput) {
+                    discardResolvedTargets(executionInput)
+                }
             }
         }
 

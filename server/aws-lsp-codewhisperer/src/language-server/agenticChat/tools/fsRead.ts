@@ -1,10 +1,5 @@
-import {
-    CommandValidation,
-    InvokeOutput,
-    requiresPathAcceptance,
-    resolveCanonicalPath,
-    validatePath,
-} from './toolShared'
+import { readCheckedFile } from './checkedFileIo'
+import { CommandValidation, InvokeOutput, requiresPathAcceptance, validatePath } from './toolShared'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
 import { FSREAD_MAX_PER_FILE, FSREAD_MAX_TOTAL } from '../constants/constants'
 
@@ -39,9 +34,13 @@ export class FsRead {
         this.maxTotal = maxTotal ?? FsRead.maxResponseSizeTotal
     }
 
-    public async validate(params: FsReadParams): Promise<void> {
-        for (const path of params.paths) {
-            await validatePath(path, this.workspace.fs.exists)
+    /**
+     * `targetPaths` are the canonical paths the approval check evaluated for
+     * `params.paths`, in the same order; `params.paths` are never resolved here.
+     */
+    public async validate(params: FsReadParams, targetPaths: string[]): Promise<void> {
+        for (const targetPath of targetPaths) {
+            await validatePath(targetPath, this.workspace.fs.exists)
         }
     }
 
@@ -49,7 +48,11 @@ export class FsRead {
         params: FsReadParams,
         approvedPaths?: Map<string, Set<string>>
     ): Promise<CommandValidation> {
-        // Check acceptance for all paths in the array
+        // Check every path and collect each canonical result, so the caller
+        // receives one resolved target per requested path even when the first
+        // path already requires approval.
+        const canonicalPaths: string[] = []
+        let firstRequired: CommandValidation | undefined
         for (const path of params.paths) {
             const validation = await requiresPathAcceptance(
                 path,
@@ -59,19 +62,29 @@ export class FsRead {
                 approvedPaths,
                 { flagMultiplyLinkedFiles: 'read' }
             )
-            if (validation.requiresAcceptance) {
-                return validation
+            if (!validation.canonicalPaths?.[0]) {
+                // The check could not resolve this path; refuse rather than
+                // proceed with a target the check did not evaluate.
+                return { requiresAcceptance: true, warning: validation.warning }
+            }
+            canonicalPaths.push(validation.canonicalPaths[0])
+            if (validation.requiresAcceptance && !firstRequired) {
+                firstRequired = validation
             }
         }
-        return { requiresAcceptance: false }
+        if (firstRequired) {
+            return { ...firstRequired, canonicalPaths }
+        }
+        return { requiresAcceptance: false, canonicalPaths }
     }
 
-    public async invoke(params: FsReadParams): Promise<InvokeOutput> {
+    /** Uses the checked targets without resolving the original aliases again. */
+    public async invoke(params: FsReadParams, targetPaths: string[]): Promise<InvokeOutput> {
         const fileResult: FileReadResult[] = []
-        for (const path of params.paths) {
-            const sanitizedPath = await resolveCanonicalPath(path)
-            const content = await this.readFile(sanitizedPath)
-            this.logging.info(`Read file: ${sanitizedPath}, size: ${content.length}`)
+        for (const [i, path] of params.paths.entries()) {
+            const targetPath = targetPaths[i]
+            const content = await this.readFile(targetPath)
+            this.logging.info(`Read file: ${targetPath}, size: ${content.length}`)
             fileResult.push({ path, content, truncated: false })
         }
 
@@ -80,7 +93,7 @@ export class FsRead {
 
     private async readFile(filePath: string): Promise<string> {
         this.logging.info(`Reading file: ${filePath}`)
-        return await this.workspace.fs.readFile(filePath)
+        return await readCheckedFile(this.workspace, filePath, this.logging)
     }
 
     private createOutput(fileResult: FileReadResult[]): InvokeOutput {

@@ -1,11 +1,5 @@
 // FileSearch tool based on ListDirectory implementation
-import {
-    CommandValidation,
-    InvokeOutput,
-    requiresPathAcceptance,
-    resolveCanonicalPath,
-    validatePath,
-} from './toolShared'
+import { CommandValidation, InvokeOutput, requiresPathAcceptance, validatePath } from './toolShared'
 import { workspaceUtils } from '@aws/lsp-core'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
 import { DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_FILES } from '../../chat/constants'
@@ -31,11 +25,15 @@ export class FileSearch {
         this.lsp = features.lsp
     }
 
-    public async validate(params: FileSearchParams): Promise<void> {
+    /**
+     * `targetPath` is the canonical path the approval check evaluated for
+     * `params.path`; `params.path` is never resolved here.
+     */
+    public async validate(params: FileSearchParams, targetPath: string): Promise<void> {
         if (params.maxDepth !== undefined && params.maxDepth < 0) {
             throw new Error('MaxDepth cannot be negative.')
         }
-        await validatePath(params.path, this.workspace.fs.exists)
+        await validatePath(targetPath, this.workspace.fs.exists)
 
         if (params.queryName.trim() == '') {
             throw new Error('queryName cannot be empty')
@@ -60,8 +58,16 @@ export class FileSearch {
         return requiresPathAcceptance(params.path, 'fileSearch', this.workspace, this.logging, approvedPaths)
     }
 
-    public async invoke(params: FileSearchParams, token?: CancellationToken): Promise<InvokeOutput> {
-        const path = await resolveCanonicalPath(params.path)
+    /**
+     * Searches under `targetPath`, the canonical path the approval check
+     * evaluated. The requested `params.path` is not resolved again.
+     */
+    public async invoke(
+        params: FileSearchParams,
+        targetPath: string,
+        token?: CancellationToken
+    ): Promise<InvokeOutput> {
+        const path = targetPath
         try {
             // Get all files and directories
             const listing = await workspaceUtils.readDirectoryRecursively(

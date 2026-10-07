@@ -3,7 +3,7 @@ import { testFolder } from '@aws/lsp-core'
 import * as path from 'path'
 import * as assert from 'assert'
 import * as fs from 'fs/promises'
-import { InvokeOutput } from './toolShared'
+import { InvokeOutput, resolveCanonicalPath } from './toolShared'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
 import { Workspace } from '@aws/language-server-runtimes/server-interface'
 import { StubbedInstance } from 'ts-sinon'
@@ -95,7 +95,7 @@ describe('FsWrite Tool', function () {
                 path: filePath,
             }
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const content = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(content, 'Hello World')
@@ -129,7 +129,7 @@ describe('FsWrite Tool', function () {
                 path: filePath,
             }
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const content = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(content, 'Goodbye')
@@ -150,7 +150,7 @@ describe('FsWrite Tool', function () {
             }
 
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const newContent = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(newContent, 'Line 1\nLine 2\nLine 3\nLine 4')
@@ -169,7 +169,7 @@ describe('FsWrite Tool', function () {
             }
 
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const newContent = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(newContent, 'Line 1\nLine 2\nLine 3\nLine 4')
@@ -187,7 +187,7 @@ describe('FsWrite Tool', function () {
                 fileText: 'Line 1',
             }
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const newContent = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(newContent, 'Line 1')
@@ -204,7 +204,7 @@ describe('FsWrite Tool', function () {
                 fileText: 'Line 2\nLine 3',
             }
             const fsWrite = new FsWrite(features)
-            const output = await fsWrite.invoke(params)
+            const output = await fsWrite.invoke(params, await resolveCanonicalPath(params.path))
 
             const newContent = await features.workspace.fs.readFile(filePath)
             assert.strictEqual(newContent, 'Line 1\nLine 2\nLine 3')
@@ -222,7 +222,10 @@ describe('FsWrite Tool', function () {
             }
 
             const fsWrite = new FsWrite(features)
-            await assert.rejects(() => fsWrite.invoke(params), /no such file or directory/)
+            await assert.rejects(
+                async () => fsWrite.invoke(params, await resolveCanonicalPath(params.path)),
+                /no such file or directory/
+            )
         })
     })
 })

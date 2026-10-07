@@ -40,7 +40,7 @@ describe('FsRead Tool', () => {
     it('invalidates empty path', async () => {
         const fsRead = new FsRead(features)
         await assert.rejects(
-            fsRead.validate({ paths: [''] }),
+            fsRead.validate({ paths: [''] }, ['']),
             /Path cannot be empty/i,
             'Expected an error about empty path'
         )
@@ -51,7 +51,7 @@ describe('FsRead Tool', () => {
         const fsRead = new FsRead(features)
 
         await assert.rejects(
-            fsRead.validate({ paths: [filePath] }),
+            fsRead.validate({ paths: [filePath] }, [filePath]),
             /does not exist or cannot be accessed/i,
             'Expected an error indicating the path does not exist'
         )
@@ -61,8 +61,8 @@ describe('FsRead Tool', () => {
         const fileContent = 'A'.repeat(FsRead.maxResponseSize + 10)
         const filePath = await tempFolder.write('largeFile.txt', fileContent)
         const fsRead = new FsRead(features)
-        await fsRead.validate({ paths: [filePath] })
-        const result = await fsRead.invoke({ paths: [filePath] })
+        await fsRead.validate({ paths: [filePath] }, [filePath])
+        const result = await fsRead.invoke({ paths: [filePath] }, [filePath])
 
         verifyResult(result, [
             { path: filePath, content: 'A'.repeat(FsRead.maxResponseSize - 3) + '...', truncated: true },
@@ -74,7 +74,7 @@ describe('FsRead Tool', () => {
         const filePath = await tempFolder.write('fullFile.txt', fileContent)
 
         const fsRead = new FsRead(features)
-        const result = await fsRead.invoke({ paths: [filePath] })
+        const result = await fsRead.invoke({ paths: [filePath] }, [filePath])
         verifyResult(result, [{ path: filePath, content: fileContent, truncated: false }])
     })
 
@@ -85,7 +85,7 @@ describe('FsRead Tool', () => {
         const filePath1 = await tempFolder.write('fullFile1.txt', fileContent1)
 
         const fsRead = new FsRead(features)
-        const result = await fsRead.invoke({ paths: [filePath, filePath1] })
+        const result = await fsRead.invoke({ paths: [filePath, filePath1] }, [filePath, filePath1])
         verifyResult(result, [
             { path: filePath, content: fileContent, truncated: false },
             { path: filePath1, content: fileContent1, truncated: false },

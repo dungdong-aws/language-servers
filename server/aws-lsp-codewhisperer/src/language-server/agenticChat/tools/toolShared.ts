@@ -6,6 +6,36 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { CommandCategory } from './executeBash'
 
+const resolvedTargets = new WeakMap<object, { toolName: string; paths: string[] }>()
+
+/** Bind checked targets to the exact object passed through the in-process runtime. */
+export function withResolvedTargets<T extends object>(input: T, toolName: string, paths: string[]): T {
+    const executionInput = { ...input }
+    resolvedTargets.set(executionInput, { toolName, paths: [...paths] })
+    return executionInput
+}
+
+export function discardResolvedTargets(input: object): void {
+    resolvedTargets.delete(input)
+}
+
+/** Consume the checked targets once; model fields and copied inputs cannot grant approval. */
+export function requireResolvedTargets(input: object, toolName: string, expectedCount: number): string[] {
+    const entry = resolvedTargets.get(input)
+    if (!entry || entry.toolName !== toolName) {
+        throw new Error('No checked targets for this operation.')
+    }
+    resolvedTargets.delete(input)
+    if (expectedCount < 1 || entry.paths.length !== expectedCount) {
+        throw new Error('Checked targets do not match this operation.')
+    }
+    return entry.paths
+}
+
+export function requireResolvedTarget(input: object, toolName: string): string {
+    return requireResolvedTargets(input, toolName, 1)[0]
+}
+
 /**
  * Resolve a path to its canonical on-disk location in a symlink-aware way,
  * including when the final path segment is a symlink whose target does not
@@ -154,6 +184,13 @@ export interface CommandValidation {
      * the usual "outside of your workspace" wording would be wrong.
      */
     acceptanceReason?: 'multiplyLinkedFile'
+    /**
+     * The canonical on-disk paths the check evaluated, in input order. Callers
+     * that go on to act on these paths must use exactly these values rather
+     * than resolving the input again, so the operation lands where the check
+     * looked.
+     */
+    canonicalPaths?: string[]
 }
 
 export async function validatePath(path: string, exists: (p: string) => Promise<boolean>) {
@@ -263,16 +300,20 @@ export async function requiresPathAcceptance(
     options?: PathAcceptanceOptions
 ): Promise<CommandValidation> {
     try {
+        if (!inputPath || !inputPath.trim()) {
+            throw new Error('Path cannot be empty.')
+        }
         // Canonicalize in a symlink-aware way before the workspace-boundary
         // check: a link whose name sits inside the workspace can point outside
         // it, including when the target does not exist yet (a dangling link).
-        // The I/O tools resolve through the same helper, so the boundary check
-        // and the operation derive the path the same way.
+        // The resolved path is returned in `canonicalPaths` so the caller acts
+        // on the exact value the check evaluated instead of resolving again.
         const canonicalPath = await resolveCanonicalPath(inputPath)
+        const canonicalPaths = [canonicalPath]
 
         // Then check if the path is already approved for this specific tool
         if (isPathApproved(canonicalPath, toolName, approvedPaths)) {
-            return { requiresAcceptance: false }
+            return { requiresAcceptance: false, canonicalPaths }
         }
 
         const workspaceFolders = getWorkspaceFolderPaths(workspace)
@@ -280,7 +321,7 @@ export async function requiresPathAcceptance(
             if (logging) {
                 logging.debug('No workspace folders found when checking file acceptance')
             }
-            return { requiresAcceptance: true }
+            return { requiresAcceptance: true, canonicalPaths }
         }
 
         // Check if the canonicalized path is inside the workspace.
@@ -304,9 +345,10 @@ export async function requiresPathAcceptance(
                     requiresAcceptance: true,
                     warning: multiplyLinkedFileWarning(options.flagMultiplyLinkedFiles),
                     acceptanceReason: 'multiplyLinkedFile',
+                    canonicalPaths,
                 }
             }
-            return { requiresAcceptance: false }
+            return { requiresAcceptance: false, canonicalPaths }
         }
 
         // For paths OUTSIDE the workspace, check if they target sensitive system
@@ -316,16 +358,18 @@ export async function requiresPathAcceptance(
             return {
                 requiresAcceptance: true,
                 warning: 'Access to sensitive system files requires explicit approval',
+                canonicalPaths,
             }
         }
 
         // Path is outside workspace but not a known sensitive location
-        return { requiresAcceptance: true }
+        return { requiresAcceptance: true, canonicalPaths }
     } catch (error) {
         if (logging) {
             logging.error(`Error checking file acceptance: ${error}`)
         }
-        // In case of error, safer to require acceptance
+        // In case of error, safer to require acceptance. No canonical path is
+        // returned, so a caller that needs one to proceed will refuse.
         return { requiresAcceptance: true }
     }
 }
