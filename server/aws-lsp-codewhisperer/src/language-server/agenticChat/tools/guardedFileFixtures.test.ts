@@ -1,12 +1,15 @@
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
-import { GuardedFileSystem } from './checkedFileIo'
+import { createCheckedFileOperations } from '@aws/language-server-runtimes/testing'
+import { captureCheckedTarget } from './checkedFileIo'
+import { resolveCanonicalPath } from './toolShared'
 
-/** Use the installed runtime's actual I/O implementation in filesystem integration tests. */
-export function withGuardedFileOperations(filesystem: Features['workspace']['fs']): GuardedFileSystem {
-    if (process.platform === 'win32') return filesystem
-    const { readFileNoFollow, updateFileNoFollow } =
-        require('@aws/language-server-runtimes/runtimes/util/standalone/guardedFile') as Required<
-            Pick<GuardedFileSystem, 'readFileNoFollow' | 'updateFileNoFollow'>
-        >
-    return Object.assign(filesystem, { readFileNoFollow, updateFileNoFollow })
+/** Use the public runtime testing seam without mutating the provider shared by other fixtures. */
+export function withGuardedFileOperations(filesystem: Features['workspace']['fs']): Features['workspace']['fs'] {
+    const operations = createCheckedFileOperations()
+    return { ...filesystem, checkedFiles: operations ? { ...operations } : undefined }
+}
+
+export async function checkedTarget(path: string) {
+    const workspace = { fs: { checkedFiles: createCheckedFileOperations() } } as Features['workspace']
+    return captureCheckedTarget(workspace, await resolveCanonicalPath(path))
 }

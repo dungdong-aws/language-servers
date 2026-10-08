@@ -161,7 +161,8 @@ import {
 import { ContextCommandsProvider } from './context/contextCommandsProvider'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError, workspaceUtils } from '@aws/lsp-core'
-import { logFileAccess, readCheckedFile, updateCheckedFile } from './tools/checkedFileIo'
+import { CheckedTarget, logFileAccess, readCheckedFile, updateCheckedFile } from './tools/checkedFileIo'
+import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
 import { FsRead, FsReadParams } from './tools/fsRead'
 import { ListDirectory, ListDirectoryParams } from './tools/listDirectory'
 import { FsWrite, FsWriteParams } from './tools/fsWrite'
@@ -172,6 +173,7 @@ import {
     InvokeOutput,
     discardResolvedTargets,
     withResolvedTargets,
+    getFileUpdate,
     resolveCanonicalPath,
     resolveSymlinkAwarePath,
     ToolApprovalException,
@@ -209,6 +211,7 @@ import {
     AgenticChatError,
     customerFacingErrorCodes,
     getCustomerFacingErrorMessage,
+    getModelFacingFileError,
     isRequestAbortedError,
     isThrottlingRelated,
     unactionableErrorCodes,
@@ -471,10 +474,7 @@ export class AgenticChatController implements ChatHandlers {
             }
         } else if (params.buttonId === BUTTON_UNDO_ALL_CHANGES) {
             const toolUseId = params.messageId.replace(SUFFIX_UNDOALL, '')
-            await this.#undoAllFileChanges(params.tabId, toolUseId, session.data)
-            return {
-                success: true,
-            }
+            return this.#undoAllFileChanges(params.tabId, toolUseId, session.data)
         } else if (params.buttonId === BUTTON_STOP_SHELL_COMMAND) {
             this.#stoppedToolUses.add(params.messageId)
             await this.#renderStoppedShellCommand(params.tabId, params.messageId)
@@ -495,27 +495,30 @@ export class AgenticChatController implements ChatHandlers {
         }
     }
 
-    async #getFileChangeDocument(requestedPath: string, targetPath: string, useWorkspace: boolean) {
-        if (useWorkspace) {
-            const documentTarget =
-                requestedPath === targetPath
-                    ? targetPath
-                    : await resolveCanonicalPath(requestedPath).catch(() => undefined)
-            if (documentTarget === targetPath) {
-                const document = await this.#triggerContext.getTextDocumentFromPath(requestedPath, true, false)
-                if (document) return document
-            }
-            if (requestedPath !== targetPath) {
-                const canonicalDocument = await this.#triggerContext.getTextDocumentFromPath(targetPath, true, false)
-                if (canonicalDocument) return canonicalDocument
-            }
-        }
+    async #getFileChangeDocument(requestedPath: string, target: CheckedTarget, useWorkspace: boolean) {
+        const targetPath = target.path
+        if (target.state === 'missing') return undefined
         try {
-            const content = await readCheckedFile(this.#features.workspace, targetPath, this.#features.logging)
+            const content = await readCheckedFile(this.#features.workspace, target, this.#features.logging)
+            if (useWorkspace) {
+                const documentTarget =
+                    requestedPath === targetPath
+                        ? targetPath
+                        : await resolveCanonicalPath(requestedPath).catch(() => undefined)
+                if (documentTarget === targetPath) {
+                    const document = await this.#triggerContext.getTextDocumentFromPath(requestedPath, true, false)
+                    if (document) return document
+                }
+                if (requestedPath !== targetPath) {
+                    const document = await this.#triggerContext.getTextDocumentFromPath(targetPath, true, false)
+                    if (document) return document
+                }
+            }
             return TextDocument.create(requestedPath, '', 0, content)
         } catch (error) {
             logFileAccess(this.#features.logging, 'snapshot.unavailable', { targetPath }, error)
-            if (useWorkspace && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+            if (useWorkspace && (target.state !== 'unverified' || (error as NodeJS.ErrnoException).code !== 'ENOENT'))
+                throw error
             return undefined
         }
     }
@@ -532,18 +535,31 @@ export class AgenticChatController implements ChatHandlers {
         const targetPath = change.targetPath ?? input.path
         const previousContent = change.before
         if (previousContent !== undefined) {
-            if (change.targetPath) {
+            if (change.target) {
                 await updateCheckedFile(
                     this.#features.workspace,
-                    targetPath,
-                    () => previousContent,
-                    { create: true, readExisting: false },
+                    change.target,
+                    current => {
+                        if (change.after === undefined || current !== change.after) {
+                            throw new Error('The file has changed since this edit. Review it before undoing.')
+                        }
+                        return previousContent
+                    },
+                    {},
                     this.#features.logging
                 )
+            } else if (change.targetPath && process.platform !== 'win32') {
+                throw new Error('This edit has no recorded file identity. Restore it manually.')
             } else {
                 await this.#features.workspace.fs.writeFile(targetPath, previousContent)
             }
         } else {
+            if (change.target && process.platform !== 'win32') {
+                throw new Error('This edit created a new file. Review and remove it manually to undo the creation.')
+            }
+            if (change.targetPath && process.platform !== 'win32') {
+                throw new Error('This edit has no recorded file identity. Review it before removing the file.')
+            }
             await this.#features.workspace.fs.rm(targetPath)
             void LocalProjectContextController.getInstance().then(controller => {
                 const filePath = URI.file(targetPath).fsPath
@@ -606,15 +622,23 @@ export class AgenticChatController implements ChatHandlers {
         tabId: string,
         toolUseId: string,
         session: ChatSessionService | undefined
-    ): Promise<void> {
+    ): Promise<ButtonClickResult> {
         this.#log(`Reverting all file changes starting from ${toolUseId}`)
         const toUndo = session?.toolUseLookup.get(toolUseId)?.relatedToolUses
-        if (!toUndo) {
-            return
-        }
+        if (!toUndo) return { success: true }
+        const failures: string[] = []
         for (const messageId of [...toUndo].reverse()) {
-            await this.onButtonClick({ buttonId: BUTTON_UNDO_CHANGES, messageId, tabId })
+            const result = await this.onButtonClick({ buttonId: BUTTON_UNDO_CHANGES, messageId, tabId })
+            if (result.success) {
+                toUndo.delete(messageId)
+            } else {
+                const input = session?.toolUseLookup.get(messageId)?.input as { path?: string } | undefined
+                failures.push(`${input?.path ?? messageId}: ${result.failureReason ?? 'Could not undo this change.'}`)
+            }
         }
+        return failures.length > 0
+            ? { success: false, failureReason: `Some changes could not be undone:\n${failures.join('\n')}` }
+            : { success: true }
     }
 
     async onOpenFileDialog(params: OpenFileDialogParams, token: CancellationToken): Promise<OpenFileDialogResult> {
@@ -2047,6 +2071,7 @@ export class AgenticChatController implements ChatHandlers {
             let toolApprovalGranted = false
             // Retain acceptance-check targets for execution and approval caching.
             let checkedCanonicalPaths: string[] | undefined
+            let checkedTargets: readonly CheckedTarget[] | undefined
             let executionInput: object | undefined
             if (!toolUse.name || !toolUse.toolUseId) continue
             session.toolUseLookup.set(toolUse.toolUseId, toolUse)
@@ -2126,6 +2151,7 @@ export class AgenticChatController implements ChatHandlers {
                             commandCategory,
                             acceptanceReason,
                             canonicalPaths,
+                            checkedTargets: acceptedTargets,
                             validationError,
                         } = await tool.requiresAcceptance(toolUse.input as any, approvedPaths)
 
@@ -2140,10 +2166,11 @@ export class AgenticChatController implements ChatHandlers {
                                 canonicalPaths,
                                 requiresAcceptance,
                             })
-                            if (!canonicalPaths?.length) {
+                            if (!acceptedTargets?.length) {
                                 throw validationError ?? new Error(`Could not resolve the path for ${toolUse.name}`)
                             }
-                            checkedCanonicalPaths = [...canonicalPaths]
+                            checkedTargets = Object.freeze(acceptedTargets.map(target => Object.freeze({ ...target })))
+                            checkedCanonicalPaths = checkedTargets.map(target => target.path)
                         }
 
                         // Honor built-in permission if available, otherwise use tool's requiresAcceptance
@@ -2299,13 +2326,13 @@ export class AgenticChatController implements ChatHandlers {
                 }
                 if (toolUse.name === FS_WRITE || toolUse.name === FS_REPLACE) {
                     const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-                    const targetPath = checkedCanonicalPaths?.[0]
-                    if (!targetPath) throw new Error('No checked target is available for this file operation.')
-                    const document = await this.#getFileChangeDocument(input.path, targetPath, true)
+                    const target = checkedTargets?.[0]
+                    if (!target) throw new Error('No checked target is available for this file operation.')
+                    const document = await this.#getFileChangeDocument(input.path, target, true)
 
                     session.toolUseLookup.set(toolUse.toolUseId, {
                         ...toolUse,
-                        fileChange: { targetPath, before: document?.getText() },
+                        fileChange: { targetPath: target.path, before: document?.getText() },
                     })
                 }
 
@@ -2353,11 +2380,11 @@ export class AgenticChatController implements ChatHandlers {
                 }
 
                 const ws = this.#getWritableStream(chatResultStream, toolUse)
-                if (checkedCanonicalPaths) {
+                if (checkedTargets) {
                     if (token?.isCancellationRequested) {
                         throw new CancellationError('user')
                     }
-                    executionInput = withResolvedTargets(toolUse.input as object, toolUse.name, checkedCanonicalPaths)
+                    executionInput = withResolvedTargets(toolUse.input as object, toolUse.name, checkedTargets)
                     logFileAccess(this.#features.logging, 'execution.started', {
                         toolUseId: toolUse.toolUseId,
                         toolName: toolUse.name,
@@ -2458,16 +2485,18 @@ export class AgenticChatController implements ChatHandlers {
                         // will only update their file contents (which
                         // then propagates to the LSP) if/when that
                         // document receives focus.
-                        const targetPath = checkedCanonicalPaths?.[0]
-                        if (!targetPath) throw new Error('No checked target is available for this file operation.')
-                        const doc = await this.#getFileChangeDocument(input.path, targetPath, false)
+                        const outcome = executionInput ? getFileUpdate(executionInput) : undefined
+                        const target =
+                            outcome?.target ?? (process.platform === 'win32' ? checkedTargets?.[0] : undefined)
+                        if (!target) throw new Error('The file update completed without a recorded file identity.')
+                        const doc = await this.#getFileChangeDocument(input.path, target, false)
                         const chatResult = await this.#getFsWriteChatResult(toolUse, doc, session)
                         const cachedToolUse = session.toolUseLookup.get(toolUse.toolUseId)
                         if (cachedToolUse) {
                             session.toolUseLookup.set(toolUse.toolUseId, {
                                 ...cachedToolUse,
                                 chatResult,
-                                fileChange: { ...cachedToolUse.fileChange, after: doc?.getText() },
+                                fileChange: { ...cachedToolUse.fileChange, target, after: doc?.getText() },
                             })
                         }
                         this.#telemetryController.emitInteractWithAgenticChat(
@@ -2550,6 +2579,21 @@ export class AgenticChatController implements ChatHandlers {
                     )
                 }
             } catch (err) {
+                if (err instanceof FileUpdateError && err.outcome.mayHaveChanged && toolUse.toolUseId) {
+                    const cached = session.toolUseLookup.get(toolUse.toolUseId)
+                    if (cached?.fileChange) {
+                        const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
+                        const target = err.outcome.target
+                        const document = target
+                            ? await this.#getFileChangeDocument(input.path, target, false)
+                            : undefined
+                        session.toolUseLookup.set(toolUse.toolUseId, {
+                            ...cached,
+                            fileChange: { ...cached.fileChange, target, after: document?.getText() },
+                        })
+                        this.#updateUndoAllState(toolUse, session)
+                    }
+                }
                 if (checkedCanonicalPaths) {
                     logFileAccess(
                         this.#features.logging,
@@ -2669,10 +2713,20 @@ export class AgenticChatController implements ChatHandlers {
                     if (fsParam.path) {
                         const fileName = path.basename(fsParam.path)
                         const customerFacingError = getCustomerFacingErrorMessage(err)
+                        const change = session.toolUseLookup.get(toolUse.toolUseId)?.fileChange
+                        const canUndoPartial =
+                            err instanceof FileUpdateError &&
+                            err.outcome.mayHaveChanged &&
+                            change?.target !== undefined &&
+                            change.before !== undefined &&
+                            change.after !== undefined
                         const errorResult = {
                             type: 'tool',
                             messageId: toolUse.toolUseId,
                             header: {
+                                buttons: canUndoPartial
+                                    ? [{ id: BUTTON_UNDO_CHANGES, text: 'Undo', icon: 'undo' }]
+                                    : [],
                                 fileList: {
                                     filePaths: [fileName],
                                     details: {
@@ -2690,6 +2744,8 @@ export class AgenticChatController implements ChatHandlers {
                             },
                         } as ChatResult
 
+                        const cached = session.toolUseLookup.get(toolUse.toolUseId)
+                        if (cached) session.toolUseLookup.set(toolUse.toolUseId, { ...cached, chatResult: errorResult })
                         if (existingCard) {
                             await chatResultStream.overwriteResultBlock(errorResult, existingCard)
                         } else {
@@ -2738,7 +2794,7 @@ export class AgenticChatController implements ChatHandlers {
                                 error: [FS_READ, FS_WRITE, FS_REPLACE, FILE_SEARCH, LIST_DIRECTORY].includes(
                                     toolUse.name
                                 )
-                                    ? getCustomerFacingErrorMessage(err)
+                                    ? getModelFacingFileError(err, toolUse.input)
                                     : err instanceof Error
                                       ? err.message
                                       : 'Unknown error',

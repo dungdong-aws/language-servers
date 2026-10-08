@@ -23,7 +23,7 @@ import {
     normalizePathFromUri,
 } from './mcp/mcpUtils'
 import { FsReplace, FsReplaceParams } from './fsReplace'
-import { requireResolvedTarget, requireResolvedTargets } from './toolShared'
+import { recordFileUpdate, requireResolvedTarget, requireResolvedTargets } from './toolShared'
 import { CodeReviewUtils } from './qCodeAnalysis/codeReviewUtils'
 import { DEFAULT_AWS_Q_ENDPOINT_URL, DEFAULT_AWS_Q_REGION } from '../../../shared/constants'
 import { getUserAgent, makeUserContextObject } from '../../../shared/telemetryUtils'
@@ -58,7 +58,9 @@ export const FsToolsServer: Server = ({ workspace, logging, agent, lsp }) => {
         async (input: FsWriteParams) => {
             const target = requireResolvedTarget(input, 'fsWrite')
             await fsWriteTool.validate(input, target)
-            return await fsWriteTool.invoke(input, target)
+            const { output, fileUpdate } = await fsWriteTool.invoke(input, target)
+            recordFileUpdate(input, fileUpdate)
+            return { output }
         },
         ToolClassification.BuiltInCanWrite
     )
@@ -68,7 +70,9 @@ export const FsToolsServer: Server = ({ workspace, logging, agent, lsp }) => {
         async (input: FsReplaceParams) => {
             const target = requireResolvedTarget(input, 'fsReplace')
             await fsReplaceTool.validate(input, target)
-            return await fsReplaceTool.invoke(input, target)
+            const { output, fileUpdate } = await fsReplaceTool.invoke(input, target)
+            recordFileUpdate(input, fileUpdate)
+            return { output }
         },
         ToolClassification.BuiltInCanWrite
     )
@@ -76,7 +80,7 @@ export const FsToolsServer: Server = ({ workspace, logging, agent, lsp }) => {
     agent.addTool(
         listDirectoryTool.getSpec(),
         async (input: ListDirectoryParams, token?: CancellationToken) => {
-            const target = requireResolvedTarget(input, 'listDirectory')
+            const target = requireResolvedTarget(input, 'listDirectory').path
             await listDirectoryTool.validate(input, target)
             return await listDirectoryTool.invoke(input, target, token)
         },
@@ -86,7 +90,7 @@ export const FsToolsServer: Server = ({ workspace, logging, agent, lsp }) => {
     agent.addTool(
         fileSearchTool.getSpec(),
         async (input: FileSearchParams, token?: CancellationToken) => {
-            const target = requireResolvedTarget(input, 'fileSearch')
+            const target = requireResolvedTarget(input, 'fileSearch').path
             await fileSearchTool.validate(input, target)
             return await fileSearchTool.invoke(input, target, token)
         },

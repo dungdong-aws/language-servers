@@ -10,10 +10,11 @@ import * as os from 'os'
 import { URI } from 'vscode-uri'
 import { newAgent } from '@aws/language-server-runtimes/runtimes/agent'
 import { FsToolsServer } from './tools/toolServer'
+import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
 import { FsWrite } from './tools/fsWrite'
 import { FsReplace } from './tools/fsReplace'
 import { withGuardedFileOperations } from './tools/guardedFileFixtures.test'
-import { BUTTON_UNDO_CHANGES } from './constants/toolConstants'
+import { BUTTON_UNDO_CHANGES, BUTTON_UNDO_ALL_CHANGES, SUFFIX_UNDOALL } from './constants/toolConstants'
 import * as pathValidation from './utils/pathValidation'
 import * as path from 'path'
 import * as chokidar from 'chokidar'
@@ -3583,6 +3584,7 @@ ${' '.repeat(8)}}
             ])
             check = sinon.stub(FsRead.prototype, 'requiresAcceptance').resolves({
                 requiresAcceptance: false,
+                checkedTargets: [{ path: target, state: 'unverified' }],
                 canonicalPaths: [target],
             })
             run = testFeatures.agent.runTool as sinon.SinonStub
@@ -3618,7 +3620,10 @@ ${' '.repeat(8)}}
             const toolUse = request()
             run.callsFake(async (name: string, input: object) => {
                 assert.strictEqual(name, 'fsRead')
-                assert.deepStrictEqual(requireResolvedTargets(input, name, 1), [target])
+                assert.deepStrictEqual(
+                    requireResolvedTargets(input, name, 1).map(target => target.path),
+                    [target]
+                )
                 assert.notStrictEqual(input, toolUse.input)
                 return { output: { kind: 'json', content: [{ path: target, content: 'fixture', truncated: false }] } }
             })
@@ -3642,12 +3647,19 @@ ${' '.repeat(8)}}
 
         it('records only the checked target after approval, even if the decision object changes during the wait', async () => {
             const targets = [target]
-            check.resolves({ requiresAcceptance: true, canonicalPaths: targets })
+            check.resolves({
+                requiresAcceptance: true,
+                canonicalPaths: targets,
+                checkedTargets: targets.map(path => ({ path, state: 'unverified' })),
+            })
             sinon.stub(chatController, 'waitForToolApproval').callsFake(async () => {
                 targets[0] = 'changed-after-check'
             })
             run.callsFake(async (name: string, input: object) => {
-                assert.deepStrictEqual(requireResolvedTargets(input, name, 1), [target])
+                assert.deepStrictEqual(
+                    requireResolvedTargets(input, name, 1).map(target => target.path),
+                    [target]
+                )
                 throw new Error('fixture execution ended')
             })
             const toolUse = request()
@@ -3662,10 +3674,17 @@ ${' '.repeat(8)}}
         it('preserves literal Windows paths in the permission body', async () => {
             const windowsTarget = 'C:\\workspace\\notes.txt'
             const validate = sinon.stub(pathValidation, 'validatePaths')
-            check.resolves({ requiresAcceptance: true, canonicalPaths: [windowsTarget] })
+            check.resolves({
+                requiresAcceptance: true,
+                canonicalPaths: [windowsTarget],
+                checkedTargets: [{ path: windowsTarget, state: 'unverified' }],
+            })
             sinon.stub(chatController, 'waitForToolApproval').resolves()
             run.callsFake(async (name: string, input: object) => {
-                assert.deepStrictEqual(requireResolvedTargets(input, name, 1), [windowsTarget])
+                assert.deepStrictEqual(
+                    requireResolvedTargets(input, name, 1).map(target => target.path),
+                    [windowsTarget]
+                )
                 return { output: { kind: 'json', content: [] } }
             })
             const toolUse = request()
@@ -3684,7 +3703,11 @@ ${' '.repeat(8)}}
         })
 
         it('does not execute or cache approval after rejection', async () => {
-            check.resolves({ requiresAcceptance: true, canonicalPaths: [target] })
+            check.resolves({
+                requiresAcceptance: true,
+                canonicalPaths: [target],
+                checkedTargets: [{ path: target, state: 'unverified' }],
+            })
             sinon.stub(chatController, 'waitForToolApproval').rejects(new ToolApprovalException())
             await assert.rejects(
                 chatController.processToolUses([request()], stream, session, 'tabId', mockCancellationToken),
@@ -3780,7 +3803,9 @@ ${' '.repeat(8)}}
                 writeFile: (file: string, content: string) => fs.writeFile(file, content),
                 rm: (file: string) => fs.rm(file),
             })
-            withGuardedFileOperations(testFeatures.workspace.fs)
+            testFeatures.workspace.fs = withGuardedFileOperations(
+                testFeatures.workspace.fs
+            ) as typeof testFeatures.workspace.fs
             // Retain real runtime dispatch, schema validation, tool validation, and file I/O.
             testFeatures.agent = newAgent()
             disposeTools = FsToolsServer(testFeatures)
@@ -3922,11 +3947,181 @@ ${' '.repeat(8)}}
                     results.map(result => result.status),
                     ['error']
                 )
-                assert.ok(JSON.stringify(results).includes('cannot be opened'), JSON.stringify(results))
+                assert.ok(JSON.stringify(results).includes('ELOOP'), JSON.stringify(results))
                 assert.ok(!JSON.stringify(results).includes(outsideContent))
                 assert.strictEqual(await fs.readFile(outsideFile, 'utf8'), outsideContent)
             })
         }
+
+        for (const name of ['fsRead', 'fsWrite', 'fsReplace'] as const) {
+            for (const replacement of ['ordinary', 'hard-link'] as const) {
+                it(`${name} rejects a ${replacement} substituted after acceptance`, async () => {
+                    changeAfterCheck(name, safeFile, async () => {
+                        await fs.rename(safeFile, path.join(workspaceDir, 'original.txt'))
+                        if (replacement === 'hard-link') await fs.link(outsideFile, safeFile)
+                        else await fs.writeFile(safeFile, 'replacement fixture')
+                    })
+                    const results = await execute(name, alias)
+                    assert.strictEqual(results[0].status, 'error')
+                    assert.ok(JSON.stringify(results).includes('changed since it was checked'))
+                    assert.ok(!JSON.stringify(results).includes(outsideContent))
+                    assert.strictEqual(await fs.readFile(outsideFile, 'utf8'), outsideContent)
+                    assert.strictEqual(
+                        await fs.readFile(path.join(workspaceDir, 'original.txt'), 'utf8'),
+                        insideContent
+                    )
+                })
+            }
+        }
+
+        it('rejects a regular file appearing at a destination accepted as missing', async () => {
+            const missing = path.join(workspaceDir, 'new.txt')
+            changeAfterCheck('fsWrite', missing, async () => fs.writeFile(missing, 'competing file'))
+            const results = await execute('fsWrite', missing)
+            assert.strictEqual(results[0].status, 'error')
+            assert.ok(JSON.stringify(results).includes('EEXIST'))
+            assert.strictEqual(await fs.readFile(missing, 'utf8'), 'competing file')
+        })
+
+        it('preserves bookkeeping and offers undo after a reported write failure with changes', async () => {
+            const operations = testFeatures.workspace.fs.checkedFiles!
+            const update = operations.update
+            sinon.stub(operations, 'update').callsFake(async (target, transform, options) => {
+                const outcome = await update(target, transform, options)
+                throw new FileUpdateError(Object.assign(new Error('Deferred write failed'), { code: 'EIO' }), {
+                    ...outcome,
+                    complete: false,
+                })
+            })
+            const results = await execute('fsWrite', alias)
+            assert.strictEqual(results[0].status, 'error')
+            assert.ok(JSON.stringify(results).includes('do not repeat the edit blindly'))
+            const change = session.toolUseLookup.get('fixture-tool-use')!.fileChange!
+            assert.strictEqual(change.before, insideContent)
+            assert.strictEqual(change.after, updatedContent)
+            assert.strictEqual(change.target?.state, 'existing')
+            const errorCard = stream.writeResultBlock
+                .getCalls()
+                .map((call: any) => call.args[0])
+                .find((card: any) => card.header?.status?.status === 'error')
+            assert.ok(errorCard.header.status.description.includes('may already contain changes'))
+            assert.strictEqual(errorCard.header.buttons[0].id, BUTTON_UNDO_CHANGES)
+            ;(operations.update as sinon.SinonStub).restore()
+            sinon.stub(chatSessionManagementService, 'getSession').returns({ success: true, data: session })
+            const undo = await chatController.onButtonClick({
+                tabId: 'tabId',
+                messageId: 'fixture-tool-use',
+                buttonId: BUTTON_UNDO_CHANGES,
+            })
+            assert.strictEqual(undo.success, true)
+            assert.strictEqual(await fs.readFile(safeFile, 'utf8'), insideContent)
+            const updateCard = (testFeatures.chat.sendChatUpdate as sinon.SinonStub).lastCall.args[0].data.messages[0]
+            assert.strictEqual(updateCard.messageId, 'fixture-tool-use')
+            assert.deepStrictEqual(updateCard.header.fileList.filePaths, [path.basename(alias)])
+            assert.strictEqual(updateCard.header.status.text, 'Change discarded')
+            assert.deepStrictEqual(updateCard.header.buttons, [])
+        })
+
+        it('reports partial Undo All and retains created files for manual removal', async () => {
+            const created = path.join(workspaceDir, 'new.txt')
+            const result = await chatController.processToolUses(
+                [
+                    {
+                        name: 'fsWrite',
+                        toolUseId: 'edit-existing',
+                        input: { path: safeFile, command: 'create', fileText: updatedContent },
+                        stop: true,
+                    },
+                    {
+                        name: 'fsWrite',
+                        toolUseId: 'create-new',
+                        input: { path: created, command: 'create', fileText: 'new content' },
+                        stop: true,
+                    },
+                ],
+                stream,
+                session,
+                'tabId',
+                mockCancellationToken
+            )
+            assert.ok(result.every(item => item.status === 'success'))
+            sinon.stub(chatSessionManagementService, 'getSession').returns({ success: true, data: session })
+            const undo = await chatController.onButtonClick({
+                tabId: 'tabId',
+                messageId: 'edit-existing' + SUFFIX_UNDOALL,
+                buttonId: BUTTON_UNDO_ALL_CHANGES,
+            })
+            assert.strictEqual(undo.success, false)
+            assert.ok(undo.failureReason?.includes(created))
+            assert.ok(undo.failureReason?.includes('remove it manually'))
+            assert.strictEqual(await fs.readFile(safeFile, 'utf8'), insideContent)
+            assert.strictEqual(await fs.readFile(created, 'utf8'), 'new content')
+            assert.deepStrictEqual([...session.toolUseLookup.get('edit-existing')!.relatedToolUses!], ['create-new'])
+            const retry = await chatController.onButtonClick({
+                tabId: 'tabId',
+                messageId: 'edit-existing' + SUFFIX_UNDOALL,
+                buttonId: BUTTON_UNDO_ALL_CHANGES,
+            })
+            assert.strictEqual(retry.success, false)
+            assert.ok(!retry.failureReason?.includes('changed since this edit'))
+        })
+
+        for (const changed of ['identity', 'content'] as const) {
+            it(`refuses undo when the written file's ${changed} changed`, async () => {
+                assert.strictEqual((await execute('fsWrite', alias))[0].status, 'success')
+                if (changed === 'identity') await fs.rename(safeFile, path.join(workspaceDir, 'written.txt'))
+                await fs.writeFile(safeFile, changed === 'identity' ? updatedContent : 'user edit')
+                sinon.stub(chatSessionManagementService, 'getSession').returns({ success: true, data: session })
+                const result = await chatController.onButtonClick({
+                    tabId: 'tabId',
+                    messageId: 'fixture-tool-use',
+                    buttonId: BUTTON_UNDO_CHANGES,
+                })
+                assert.strictEqual(result.success, false)
+                assert.strictEqual(
+                    await fs.readFile(safeFile, 'utf8'),
+                    changed === 'identity' ? updatedContent : 'user edit'
+                )
+                const bulk = await chatController.onButtonClick({
+                    tabId: 'tabId',
+                    messageId: 'fixture-tool-use' + SUFFIX_UNDOALL,
+                    buttonId: BUTTON_UNDO_ALL_CHANGES,
+                })
+                assert.strictEqual(bulk.success, false)
+                assert.ok(bulk.failureReason?.includes(alias))
+                assert.strictEqual(
+                    await fs.readFile(safeFile, 'utf8'),
+                    changed === 'identity' ? updatedContent : 'user edit'
+                )
+            })
+        }
+
+        it('retains the failing replacement and requested path in model diagnostics', async () => {
+            const results = await chatController.processToolUses(
+                [
+                    {
+                        name: 'fsReplace',
+                        toolUseId: 'fixture-tool-use',
+                        input: {
+                            path: alias,
+                            diffs: [
+                                { oldStr: insideContent, newStr: 'intermediate' },
+                                { oldStr: 'missing second diff', newStr: 'after' },
+                            ],
+                        },
+                        stop: true,
+                    },
+                ],
+                stream,
+                session,
+                'tabId',
+                mockCancellationToken
+            )
+            assert.strictEqual(results[0].status, 'error')
+            assert.ok(JSON.stringify(results).includes('missing second diff'))
+            assert.ok(JSON.stringify(results).includes(alias))
+            assert.strictEqual(await fs.readFile(safeFile, 'utf8'), insideContent)
+        })
 
         it('appends through the checked target while preserving the requested path', async () => {
             changeAfterCheck('fsWrite', safeFile, async () => {
@@ -4032,6 +4227,7 @@ ${' '.repeat(8)}}
                 const change = session.toolUseLookup.get('fixture-tool-use')?.fileChange
                 assert.ok(change)
                 delete change.targetPath
+                delete change.target
                 change.before = previousContent
                 const write = sinon.spy(testFeatures.workspace.fs, 'writeFile')
                 const remove = sinon.spy(testFeatures.workspace.fs, 'rm')
@@ -4048,7 +4244,7 @@ ${' '.repeat(8)}}
             })
         }
 
-        it('removes the recorded new file on undo without removing a changed alias', async () => {
+        it('requires manual removal to undo creation without risking a replacement entry', async () => {
             const created = path.join(workspaceDir, 'new.txt')
             await fs.unlink(alias)
             await fs.symlink(created, alias)
@@ -4061,15 +4257,16 @@ ${' '.repeat(8)}}
                 messageId: 'fixture-tool-use',
                 buttonId: BUTTON_UNDO_CHANGES,
             })
-            assert.strictEqual(result.success, true)
-            await assert.rejects(fs.stat(created), { code: 'ENOENT' })
+            assert.strictEqual(result.success, false)
+            assert.ok(result.failureReason?.includes('remove it manually'))
+            assert.strictEqual(await fs.readFile(created, 'utf8'), updatedContent)
             assert.ok((await fs.lstat(alias)).isSymbolicLink())
             assert.strictEqual(await fs.readFile(outsideFile, 'utf8'), outsideContent)
         })
 
         it('does not write when the before snapshot cannot be captured', async () => {
             sinon
-                .stub(testFeatures.workspace.fs as any, 'readFileNoFollow')
+                .stub(testFeatures.workspace.fs.checkedFiles!, 'read')
                 .rejects(Object.assign(new Error('EACCES: fixture read denied'), { code: 'EACCES' }))
             const results = await execute('fsWrite', alias)
             assert.strictEqual(results[0].status, 'error')
@@ -4079,7 +4276,7 @@ ${' '.repeat(8)}}
         })
 
         it('does not capture a file snapshot or dispatch after cancellation', async () => {
-            const read = sinon.spy(testFeatures.workspace.fs as any, 'readFileNoFollow')
+            const read = sinon.spy(testFeatures.workspace.fs.checkedFiles!, 'read')
             const input: ToolUse['input'] = { path: alias, command: 'create', fileText: updatedContent }
             const results = await chatController.processToolUses(
                 [{ name: 'fsWrite', toolUseId: 'cancelled-write', input, stop: true }],
@@ -4098,7 +4295,7 @@ ${' '.repeat(8)}}
             for (const name of ['fsRead', 'fsWrite'] as const) {
                 const results = await execute(name, '')
                 assert.strictEqual(results[0].status, 'error')
-                assert.ok(JSON.stringify(results).includes('The file path cannot be empty.'))
+                assert.ok(JSON.stringify(results).includes('Path must not be empty'))
             }
             sinon.assert.notCalled(run)
         })
@@ -4111,7 +4308,7 @@ ${' '.repeat(8)}}
                 targetPath
             ) {
                 await original.call(this, params, targetPath)
-                assert.strictEqual(targetPath, safeFile)
+                assert.strictEqual(targetPath.path, safeFile)
                 await fs.unlink(safeFile)
                 await fs.symlink(outsideFile, safeFile)
             })
@@ -4123,7 +4320,7 @@ ${' '.repeat(8)}}
                 results.map(result => result.status),
                 ['error']
             )
-            assert.ok(JSON.stringify(results).includes('cannot be opened'), JSON.stringify(results))
+            assert.ok(JSON.stringify(results).includes('ELOOP'), JSON.stringify(results))
             assert.strictEqual(await fs.readFile(outsideFile, 'utf8'), outsideContent)
         })
 
@@ -4134,13 +4331,13 @@ ${' '.repeat(8)}}
             })
             const results = await execute('fsWrite', missing)
             sinon.assert.calledOnce(check)
-            sinon.assert.notCalled(run)
+            sinon.assert.calledOnce(run)
             sinon.assert.notCalled(approval)
             assert.deepStrictEqual(
                 results.map(result => result.status),
                 ['error']
             )
-            assert.ok(JSON.stringify(results).includes('cannot be opened'), JSON.stringify(results))
+            assert.ok(JSON.stringify(results).includes('EEXIST'), JSON.stringify(results))
             assert.strictEqual(await fs.readFile(outsideFile, 'utf8'), outsideContent)
         })
     })

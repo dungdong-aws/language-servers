@@ -1,15 +1,16 @@
 import * as assert from 'assert'
 import * as sinon from 'sinon'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
-import { GuardedFileSystem, readCheckedFile, updateCheckedFile, logFileAccess } from './checkedFileIo'
+import { captureCheckedTarget, CheckedTarget, readCheckedFile, updateCheckedFile, logFileAccess } from './checkedFileIo'
 import { FileOperationError } from '../errors'
 import { withGuardedFileOperations } from './guardedFileFixtures.test'
 
 describe('checked file runtime delegation', () => {
+    const target: CheckedTarget = { path: 'checked-target', state: 'existing', dev: '1', ino: '2', linkCount: '1' }
     let features: TestFeatures
-    let filesystem: GuardedFileSystem
     let read: sinon.SinonStub
     let update: sinon.SinonStub
+    let capture: sinon.SinonStub
     let rawRead: sinon.SinonStub
     let rawWrite: sinon.SinonStub
     let platform: sinon.SinonStub
@@ -18,89 +19,100 @@ describe('checked file runtime delegation', () => {
         features = new TestFeatures()
         platform = sinon.stub(process, 'platform').value('linux')
         read = sinon.stub().resolves('fixture')
-        update = sinon.stub().resolves()
+        update = sinon.stub().resolves({ mayHaveChanged: true, complete: true, target })
+        capture = sinon.stub().resolves(target)
         rawRead = sinon.stub().resolves('before')
         rawWrite = sinon.stub().resolves()
-        filesystem = Object.assign(features.workspace.fs, {
+        Object.assign(features.workspace.fs, {
             readFile: rawRead,
             writeFile: rawWrite,
-            readFileNoFollow: read,
-            updateFileNoFollow: update,
+            checkedFiles: { version: 1, capture, read, update },
         })
     })
-
     afterEach(() => sinon.restore())
 
-    it('passes the checked read target to the runtime', async () => {
-        assert.strictEqual(await readCheckedFile(features.workspace, 'checked-target'), 'fixture')
-        sinon.assert.calledOnceWithExactly(read, 'checked-target')
-        assert.strictEqual(read.firstCall.thisValue, filesystem)
+    it('captures an immutable target and passes its identity to runtime reads', async () => {
+        const checked = await captureCheckedTarget(features.workspace, target.path)
+        assert.ok(Object.isFrozen(checked))
+        assert.notStrictEqual(checked, target)
+        assert.strictEqual(await readCheckedFile(features.workspace, checked), 'fixture')
+        sinon.assert.calledOnceWithExactly(capture, target.path)
+        sinon.assert.calledOnceWithExactly(read, checked)
         sinon.assert.notCalled(rawRead)
     })
 
-    it('delegates one complete update with the existing transform and options', async () => {
+    it('delegates one complete update and returns the actual handle outcome', async () => {
         const transform = (content: string) => content + ' after'
         const options = { create: true, readExisting: false }
-        await updateCheckedFile(features.workspace, 'checked-target', transform, options)
-        sinon.assert.calledOnceWithExactly(update, 'checked-target', transform, options)
-        assert.strictEqual(update.firstCall.thisValue, filesystem)
+        const outcome = await updateCheckedFile(features.workspace, target, transform, options)
+        sinon.assert.calledOnceWithExactly(update, target, transform, options)
+        assert.deepStrictEqual(outcome, { mayHaveChanged: true, complete: true, target })
         sinon.assert.notCalled(rawRead)
         sinon.assert.notCalled(rawWrite)
     })
 
-    it('refuses an unavailable capability before reading or writing', async () => {
-        delete filesystem.readFileNoFollow
-        delete filesystem.updateFileNoFollow
-        await assert.rejects(readCheckedFile(features.workspace, 'checked-target'), FileOperationError)
+    it('rejects absent, incompatible, and incomplete contracts before ordinary I/O', async () => {
+        for (const capability of [undefined, { version: 0, read, update, capture }, { version: 1, read, capture }]) {
+            features.workspace.fs.checkedFiles = capability as any
+            await assert.rejects(captureCheckedTarget(features.workspace, target.path), FileOperationError)
+            await assert.rejects(readCheckedFile(features.workspace, target), FileOperationError)
+            await assert.rejects(
+                updateCheckedFile(features.workspace, target, () => 'changed'),
+                FileOperationError
+            )
+        }
+        sinon.assert.notCalled(rawRead)
+        sinon.assert.notCalled(rawWrite)
+    })
+
+    it('rejects unverified POSIX targets instead of capturing late or falling back', async () => {
+        const unverified: CheckedTarget = { path: target.path, state: 'unverified' }
+        await assert.rejects(readCheckedFile(features.workspace, unverified), /No checked file identity/)
         await assert.rejects(
-            updateCheckedFile(features.workspace, 'checked-target', () => 'changed'),
-            FileOperationError
+            updateCheckedFile(features.workspace, unverified, () => 'changed'),
+            /No checked file identity/
         )
+        sinon.assert.notCalled(capture)
         sinon.assert.notCalled(rawRead)
         sinon.assert.notCalled(rawWrite)
     })
 
     it('preserves runtime errors without an unguarded fallback', async () => {
-        const failure = Object.assign(new Error('Open failed'), { code: 'ELOOP' })
+        const failure = Object.assign(new Error('Open failed'), { code: 'ESTALE' })
         read.rejects(failure)
         update.rejects(failure)
-        await assert.rejects(readCheckedFile(features.workspace, 'checked-target'), error => error === failure)
+        await assert.rejects(readCheckedFile(features.workspace, target), error => error === failure)
         await assert.rejects(
-            updateCheckedFile(features.workspace, 'checked-target', () => 'changed'),
+            updateCheckedFile(features.workspace, target, () => 'changed'),
             error => error === failure
         )
         sinon.assert.notCalled(rawRead)
         sinon.assert.notCalled(rawWrite)
     })
 
-    it('retains the Windows provider path without invoking guarded operations', async () => {
+    it('retains the Windows provider without exposing guarded operations in fixtures', async () => {
         platform.value('win32')
-        assert.strictEqual(await readCheckedFile(features.workspace, 'checked-target'), 'before')
-        await updateCheckedFile(features.workspace, 'checked-target', content => content + ' after')
-        sinon.assert.calledWithExactly(rawWrite, 'checked-target', 'before after')
+        const windowsTarget = await captureCheckedTarget(features.workspace, 'C:\\workspace\\file.txt')
+        assert.strictEqual(windowsTarget.state, 'unverified')
+        assert.strictEqual(await readCheckedFile(features.workspace, windowsTarget), 'before')
+        await updateCheckedFile(features.workspace, windowsTarget, text => text + ' after')
+        sinon.assert.calledWithExactly(rawWrite, windowsTarget.path, 'before after')
         rawRead.resetHistory()
-        await updateCheckedFile(features.workspace, 'new-target', () => 'new', { create: true, readExisting: false })
+        await updateCheckedFile(features.workspace, windowsTarget, () => 'new', { create: true, readExisting: false })
         sinon.assert.notCalled(rawRead)
-        sinon.assert.calledWithExactly(rawWrite, 'new-target', 'new')
+        sinon.assert.notCalled(capture)
         sinon.assert.notCalled(read)
         sinon.assert.notCalled(update)
-    })
-
-    it('keeps Windows fixtures on the existing provider without adding guarded methods', async () => {
-        platform.value('win32')
-        delete filesystem.readFileNoFollow
-        delete filesystem.updateFileNoFollow
-        assert.strictEqual(withGuardedFileOperations(filesystem), filesystem)
-        assert.strictEqual(filesystem.readFileNoFollow, undefined)
-        assert.strictEqual(filesystem.updateFileNoFollow, undefined)
-        assert.strictEqual(await readCheckedFile(features.workspace, 'checked-target'), 'before')
-        sinon.assert.calledOnceWithExactly(rawRead, 'checked-target')
+        const fixture = withGuardedFileOperations(features.workspace.fs)
+        assert.notStrictEqual(fixture, features.workspace.fs)
+        assert.strictEqual(fixture.checkedFiles, undefined)
+        assert.ok(features.workspace.fs.checkedFiles)
     })
 
     it('does not write when a Windows transform fails', async () => {
         platform.value('win32')
         await assert.rejects(
-            updateCheckedFile(features.workspace, 'checked-target', () => {
+            updateCheckedFile(features.workspace, target, () => {
                 throw new Error('Transform failed')
             }),
             /Transform failed/
@@ -112,10 +124,7 @@ describe('checked file runtime delegation', () => {
         const failure = Object.assign(new Error('private-message'), { code: 'ELOOP' })
         read.rejects(failure)
         const debug = sinon.stub()
-        await assert.rejects(
-            readCheckedFile(features.workspace, 'checked-target', { debug }),
-            error => error === failure
-        )
+        await assert.rejects(readCheckedFile(features.workspace, target, { debug }), error => error === failure)
         assert.ok(debug.firstCall.args[0].includes('ELOOP'))
         assert.ok(!debug.firstCall.args[0].includes('private-message'))
         logFileAccess(
@@ -125,7 +134,7 @@ describe('checked file runtime delegation', () => {
                 },
             },
             'example',
-            { targetPath: 'checked-target' }
+            { targetPath: target.path }
         )
     })
 })

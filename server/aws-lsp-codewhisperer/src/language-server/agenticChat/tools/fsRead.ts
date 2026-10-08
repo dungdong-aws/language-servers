@@ -1,4 +1,4 @@
-import { readCheckedFile } from './checkedFileIo'
+import { CheckedTarget, readCheckedFile } from './checkedFileIo'
 import { CommandValidation, InvokeOutput, requiresPathAcceptance, validatePath } from './toolShared'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
 import { FSREAD_MAX_PER_FILE, FSREAD_MAX_TOTAL } from '../constants/constants'
@@ -38,9 +38,10 @@ export class FsRead {
      * `targetPaths` are the canonical paths the approval check evaluated for
      * `params.paths`, in the same order; `params.paths` are never resolved here.
      */
-    public async validate(params: FsReadParams, targetPaths: string[]): Promise<void> {
-        for (const targetPath of targetPaths) {
-            await validatePath(targetPath, this.workspace.fs.exists)
+    public async validate(params: FsReadParams, targets: readonly CheckedTarget[]): Promise<void> {
+        for (const [index, target] of targets.entries()) {
+            if (target.state === 'unverified') await validatePath(target.path, this.workspace.fs.exists)
+            if (target.state === 'missing') throw new Error(`File "${params.paths[index]}" does not exist.`)
         }
     }
 
@@ -51,7 +52,7 @@ export class FsRead {
         // Check every path and collect each canonical result, so the caller
         // receives one resolved target per requested path even when the first
         // path already requires approval.
-        const canonicalPaths: string[] = []
+        const checkedTargets: CheckedTarget[] = []
         let firstRequired: CommandValidation | undefined
         for (const path of params.paths) {
             const validation = await requiresPathAcceptance(
@@ -62,42 +63,39 @@ export class FsRead {
                 approvedPaths,
                 { flagMultiplyLinkedFiles: 'read' }
             )
-            if (!validation.canonicalPaths?.[0]) {
-                // The check could not resolve this path; refuse rather than
-                // proceed with a target the check did not evaluate.
+            const target = validation.checkedTargets?.[0]
+            if (!target) {
                 return {
                     requiresAcceptance: true,
                     warning: validation.warning,
                     validationError: validation.validationError,
                 }
             }
-            canonicalPaths.push(validation.canonicalPaths[0])
-            if (validation.requiresAcceptance && !firstRequired) {
-                firstRequired = validation
-            }
+            checkedTargets.push(target)
+            if (validation.requiresAcceptance && !firstRequired) firstRequired = validation
         }
-        if (firstRequired) {
-            return { ...firstRequired, canonicalPaths }
+        return {
+            ...firstRequired,
+            requiresAcceptance: firstRequired?.requiresAcceptance ?? false,
+            canonicalPaths: checkedTargets.map(target => target.path),
+            checkedTargets: Object.freeze(checkedTargets),
         }
-        return { requiresAcceptance: false, canonicalPaths }
     }
 
     /** Uses the checked targets without resolving the original aliases again. */
-    public async invoke(params: FsReadParams, targetPaths: string[]): Promise<InvokeOutput> {
+    public async invoke(params: FsReadParams, targets: readonly CheckedTarget[]): Promise<InvokeOutput> {
         const fileResult: FileReadResult[] = []
         for (const [i, path] of params.paths.entries()) {
-            const targetPath = targetPaths[i]
-            const content = await this.readFile(targetPath)
-            this.logging.info(`Read file: ${targetPath}, size: ${content.length}`)
-            fileResult.push({ path, content, truncated: false })
+            try {
+                const content = await readCheckedFile(this.workspace, targets[i], this.logging)
+                this.logging.info(`Read file: ${targets[i].path}, size: ${content.length}`)
+                fileResult.push({ path, content, truncated: false })
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error)
+                throw new Error(`Could not read "${path}": ${detail}`, { cause: error })
+            }
         }
-
         return this.createOutput(fileResult)
-    }
-
-    private async readFile(filePath: string): Promise<string> {
-        this.logging.info(`Reading file: ${filePath}`)
-        return await readCheckedFile(this.workspace, filePath, this.logging)
     }
 
     private createOutput(fileResult: FileReadResult[]): InvokeOutput {

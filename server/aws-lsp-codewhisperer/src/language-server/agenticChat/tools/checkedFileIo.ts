@@ -1,15 +1,13 @@
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
+import {
+    CheckedFileOperations,
+    CheckedFileTarget,
+    FileUpdateOutcome,
+} from '@aws/language-server-runtimes/server-interface/checkedFile'
 import { FileOperationError } from '../errors'
 
-export type GuardedFileSystem = Features['workspace']['fs'] & {
-    readFileNoFollow?: (path: string) => Promise<string>
-    updateFileNoFollow?: (
-        path: string,
-        transform: (content: string) => string,
-        options?: { create?: boolean; readExisting?: boolean }
-    ) => Promise<void>
-}
-
+export type CheckedTarget = CheckedFileTarget | Readonly<{ path: string; state: 'unverified' }>
+export type GuardedFileSystem = Features['workspace']['fs']
 type DebugLogger = Pick<Features['logging'], 'debug'>
 
 /** Diagnostic failures must not change the operation. Never pass content or full tool inputs here. */
@@ -45,47 +43,59 @@ export function logFileAccess(
     }
 }
 
-function unsupportedRuntime(): FileOperationError {
-    return new FileOperationError(
-        'Required filesystem operation is unavailable in this runtime',
-        'The language-server runtime must be updated before this file operation can run.'
-    )
+function checkedFiles(workspace: Features['workspace']): CheckedFileOperations {
+    const operations = workspace.fs.checkedFiles
+    if (
+        operations?.version !== 1 ||
+        typeof operations.capture !== 'function' ||
+        typeof operations.read !== 'function' ||
+        typeof operations.update !== 'function'
+    ) {
+        throw new FileOperationError(
+            'Required filesystem contract version 1 is unavailable in this runtime',
+            'The language-server runtime must be updated before this file operation can run.'
+        )
+    }
+    return operations
+}
+
+export async function captureCheckedTarget(workspace: Features['workspace'], path: string): Promise<CheckedTarget> {
+    if (process.platform === 'win32') return Object.freeze({ path, state: 'unverified' })
+    return Object.freeze({ ...(await checkedFiles(workspace).capture(path)) })
 }
 
 export async function readCheckedFile(
     workspace: Features['workspace'],
-    targetPath: string,
+    target: CheckedTarget,
     logging?: DebugLogger
 ): Promise<string> {
     try {
-        if (process.platform === 'win32') return await workspace.fs.readFile(targetPath)
-        const operation = (workspace.fs as GuardedFileSystem).readFileNoFollow
-        if (typeof operation !== 'function') throw unsupportedRuntime()
-        return await operation.call(workspace.fs, targetPath)
+        if (process.platform === 'win32') return await workspace.fs.readFile(target.path)
+        if (target.state === 'unverified') throw new Error('No checked file identity for this operation.')
+        return await checkedFiles(workspace).read(target)
     } catch (error) {
-        logFileAccess(logging, 'io.failed', { targetPath, operation: 'read' }, error)
+        logFileAccess(logging, 'io.failed', { targetPath: target.path, operation: 'read' }, error)
         throw error
     }
 }
 
 export async function updateCheckedFile(
     workspace: Features['workspace'],
-    targetPath: string,
+    target: CheckedTarget,
     transform: (content: string) => string,
     options: { create?: boolean; readExisting?: boolean } = {},
     logging?: DebugLogger
-): Promise<void> {
+): Promise<FileUpdateOutcome> {
     try {
         if (process.platform === 'win32') {
-            const content = options.readExisting === false ? '' : await workspace.fs.readFile(targetPath)
-            await workspace.fs.writeFile(targetPath, transform(content))
-            return
+            const content = options.readExisting === false ? '' : await workspace.fs.readFile(target.path)
+            await workspace.fs.writeFile(target.path, transform(content))
+            return { mayHaveChanged: true, complete: true }
         }
-        const operation = (workspace.fs as GuardedFileSystem).updateFileNoFollow
-        if (typeof operation !== 'function') throw unsupportedRuntime()
-        await operation.call(workspace.fs, targetPath, transform, options)
+        if (target.state === 'unverified') throw new Error('No checked file identity for this operation.')
+        return await checkedFiles(workspace).update(target, transform, options)
     } catch (error) {
-        logFileAccess(logging, 'io.failed', { targetPath, operation: 'update' }, error)
+        logFileAccess(logging, 'io.failed', { targetPath: target.path, operation: 'update' }, error)
         throw error
     }
 }

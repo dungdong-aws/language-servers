@@ -1,4 +1,5 @@
 import { CodeWhispererStreamingServiceException } from '@amzn/codewhisperer-streaming'
+import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
 
 type AgenticChatErrorCode =
     | 'QModelResponse' // generic backend error.
@@ -195,9 +196,15 @@ export function createFileOperationError(error: Error): FileOperationError {
         )
     }
 
+    if (code === 'ESTALE') {
+        return new FileOperationError(message, 'The file changed since it was checked. Review it before trying again.')
+    }
+    if (code === 'ENXIO' || code === 'EINVAL') {
+        return new FileOperationError(message, 'The specified path cannot be used as a regular file.')
+    }
     // Common file system errors
     if (code === 'ENOENT' || message.includes('ENOENT') || message.includes('no such file or directory')) {
-        return new DirectoryNotFoundError(message)
+        return new FileOperationError(message, 'The file or directory does not exist.')
     }
     if (code === 'EACCES' || code === 'EPERM' || message.includes('EACCES') || message.includes('permission denied')) {
         return new PermissionDeniedError(message)
@@ -255,6 +262,12 @@ export function createFileOperationError(error: Error): FileOperationError {
  * @returns A customer-facing error message
  */
 export function getCustomerFacingErrorMessage(error: unknown): string {
+    if (error instanceof FileUpdateError) {
+        const message = getCustomerFacingErrorMessage(error.cause)
+        return error.outcome.mayHaveChanged
+            ? `${message} The file may already contain changes. Review it before retrying.`
+            : message
+    }
     if (error instanceof FileOperationError) {
         return error.customerMessage
     }
@@ -264,6 +277,17 @@ export function getCustomerFacingErrorMessage(error: unknown): string {
     }
 
     return String(error)
+}
+
+export function getModelFacingFileError(error: unknown, input: unknown): string {
+    const params = input as { path?: unknown; paths?: unknown }
+    const requested = typeof params?.path === 'string' ? params.path : params?.paths
+    const detail = error instanceof Error ? error.message : String(error)
+    const warning =
+        error instanceof FileUpdateError && error.outcome.mayHaveChanged
+            ? ' The file may already contain changes. Read and review it before retrying; do not repeat the edit blindly.'
+            : ''
+    return `${requested === undefined ? '' : `Requested path(s): ${JSON.stringify(requested)}. `}${detail}${warning}`
 }
 
 export function isThrottlingRelated(error: unknown): boolean {

@@ -1,4 +1,4 @@
-import { readCheckedFile, updateCheckedFile } from './checkedFileIo'
+import { CheckedTarget, readCheckedFile, updateCheckedFile } from './checkedFileIo'
 import { CommandValidation, ExplanatoryParams, InvokeOutput, requiresPathAcceptance } from './toolShared'
 import { EmptyPathError, MissingContentError, FileExistsWithSameContentError, EmptyAppendContentError } from '../errors'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
@@ -42,7 +42,7 @@ export class FsWrite {
      * `params.path`. It is required so validation looks at the same file the
      * write will touch; `params.path` is never resolved here.
      */
-    public async validate(params: FsWriteParams, targetPath: string): Promise<void> {
+    public async validate(params: FsWriteParams, targetPath: CheckedTarget): Promise<void> {
         if (!params.path) {
             throw new EmptyPathError()
         }
@@ -51,7 +51,10 @@ export class FsWrite {
                 if (params.fileText === undefined) {
                     throw new MissingContentError()
                 }
-                const fileExists = await this.workspace.fs.exists(targetPath)
+                const fileExists =
+                    targetPath.state === 'unverified'
+                        ? await this.workspace.fs.exists(targetPath.path)
+                        : targetPath.state === 'existing'
                 if (fileExists) {
                     const oldContent = await readCheckedFile(this.workspace, targetPath, this.logging)
                     if (oldContent === params.fileText) {
@@ -69,20 +72,22 @@ export class FsWrite {
     }
 
     /** Uses the checked target without resolving the original alias again. */
-    public async invoke(params: FsWriteParams, targetPath: string): Promise<InvokeOutput> {
+    public async invoke(params: FsWriteParams, targetPath: CheckedTarget): Promise<InvokeOutput> {
         let content = ''
+        let fileUpdate: InvokeOutput['fileUpdate']
         switch (params.command) {
             case 'create':
-                await this.handleCreate(params, targetPath)
+                fileUpdate = await this.handleCreate(params, targetPath)
                 content = 'File created successfully'
                 break
             case 'append':
-                await this.handleAppend(params, targetPath)
+                fileUpdate = await this.handleAppend(params, targetPath)
                 content = 'File appended successfully'
                 break
         }
 
         return {
+            fileUpdate,
             output: {
                 kind: 'text',
                 content,
@@ -107,9 +112,9 @@ export class FsWrite {
         })
     }
 
-    private async handleCreate(params: CreateParams, targetPath: string): Promise<void> {
+    private async handleCreate(params: CreateParams, targetPath: CheckedTarget) {
         const content = params.fileText
-        await updateCheckedFile(
+        const outcome = await updateCheckedFile(
             this.workspace,
             targetPath,
             () => content,
@@ -119,13 +124,14 @@ export class FsWrite {
 
         // Add created file to @Files list
         void LocalProjectContextController.getInstance().then(controller => {
-            const filePath = URI.file(targetPath).fsPath
+            const filePath = URI.file(targetPath.path).fsPath
             return controller.updateIndexAndContextCommand([filePath], true)
         })
+        return outcome
     }
 
-    private async handleAppend(params: AppendParams, targetPath: string): Promise<void> {
-        await updateCheckedFile(
+    private async handleAppend(params: AppendParams, targetPath: CheckedTarget) {
+        return updateCheckedFile(
             this.workspace,
             targetPath,
             fileContent => getAppendContent(params, fileContent),

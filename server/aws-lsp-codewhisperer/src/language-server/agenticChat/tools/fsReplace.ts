@@ -1,4 +1,4 @@
-import { updateCheckedFile } from './checkedFileIo'
+import { CheckedTarget, updateCheckedFile } from './checkedFileIo'
 import { CommandValidation, ExplanatoryParams, InvokeOutput, requiresPathAcceptance } from './toolShared'
 import { EmptyPathError, EmptyDiffsError, FileNotExistsError, TextNotFoundError, MultipleMatchesError } from '../errors'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
@@ -34,14 +34,17 @@ export class FsReplace {
      * `targetPath` is the canonical path the approval check evaluated for
      * `params.path`; `params.path` is never resolved here.
      */
-    public async validate(params: FsReplaceParams, targetPath: string): Promise<void> {
+    public async validate(params: FsReplaceParams, targetPath: CheckedTarget): Promise<void> {
         if (!params.path) {
             throw new EmptyPathError()
         }
         if (!params.diffs || params.diffs.length === 0) {
             throw new EmptyDiffsError()
         }
-        const fileExists = await this.workspace.fs.exists(targetPath)
+        const fileExists =
+            targetPath.state === 'unverified'
+                ? await this.workspace.fs.exists(targetPath.path)
+                : targetPath.state === 'existing'
         if (!fileExists) {
             throw new FileNotExistsError()
         }
@@ -51,10 +54,11 @@ export class FsReplace {
      * Rewrites `targetPath`, the canonical path the approval check evaluated.
      * The requested `params.path` is not resolved again.
      */
-    public async invoke(params: FsReplaceParams, targetPath: string): Promise<InvokeOutput> {
-        await this.handleReplace(params, targetPath)
+    public async invoke(params: FsReplaceParams, targetPath: CheckedTarget): Promise<InvokeOutput> {
+        const fileUpdate = await this.handleReplace(params, targetPath)
 
         return {
+            fileUpdate,
             output: {
                 kind: 'text',
                 content: 'File updated successfully',
@@ -71,8 +75,8 @@ export class FsReplace {
         })
     }
 
-    private async handleReplace(params: ReplaceParams, targetPath: string): Promise<void> {
-        await updateCheckedFile(
+    private async handleReplace(params: ReplaceParams, targetPath: CheckedTarget) {
+        return updateCheckedFile(
             this.workspace,
             targetPath,
             fileContent => getReplaceContent(params, fileContent),
