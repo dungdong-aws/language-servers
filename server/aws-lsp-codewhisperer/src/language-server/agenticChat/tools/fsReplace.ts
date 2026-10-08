@@ -71,10 +71,10 @@ export class FsReplace {
         })
     }
 
-    private async handleReplace(params: ReplaceParams, sanitizedPath: string): Promise<void> {
+    private async handleReplace(params: ReplaceParams, targetPath: string): Promise<void> {
         await updateCheckedFile(
             this.workspace,
-            sanitizedPath,
+            targetPath,
             fileContent => getReplaceContent(params, fileContent),
             {},
             this.logging

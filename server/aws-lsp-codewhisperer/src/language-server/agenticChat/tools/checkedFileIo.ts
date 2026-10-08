@@ -1,6 +1,14 @@
-import { constants } from 'fs'
-import { open, FileHandle } from 'fs/promises'
 import { Features } from '@aws/language-server-runtimes/server-interface/server'
+import { FileOperationError } from '../errors'
+
+export type GuardedFileSystem = Features['workspace']['fs'] & {
+    readFileNoFollow?: (path: string) => Promise<string>
+    updateFileNoFollow?: (
+        path: string,
+        transform: (content: string) => string,
+        options?: { create?: boolean; readExisting?: boolean }
+    ) => Promise<void>
+}
 
 type DebugLogger = Pick<Features['logging'], 'debug'>
 
@@ -37,41 +45,11 @@ export function logFileAccess(
     }
 }
 
-/** Opens the target retained by the acceptance check and validates the resulting handle. */
-async function openRegularFile(targetPath: string, flags: number, logging?: DebugLogger): Promise<FileHandle> {
-    let handle: FileHandle
-    try {
-        if (!constants.O_NOFOLLOW) {
-            throw new Error('Final-component no-follow file access is not supported on this platform')
-        }
-        handle = await open(targetPath, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    } catch (error) {
-        logFileAccess(logging, 'open.failed', { targetPath }, error)
-        throw error
-    }
-    logFileAccess(logging, 'open.completed', { targetPath, fd: handle.fd })
-    try {
-        if (!(await handle.stat()).isFile()) {
-            throw new Error('Expected a regular file')
-        }
-        logFileAccess(logging, 'handle.checked', { targetPath, fd: handle.fd })
-        return handle
-    } catch (error) {
-        logFileAccess(logging, 'handle.checkFailed', { targetPath, fd: handle.fd }, error)
-        await closeFile(handle, targetPath, logging)
-        throw error
-    }
-}
-
-async function closeFile(handle: FileHandle, targetPath: string, logging?: DebugLogger): Promise<void> {
-    const fd = handle.fd
-    try {
-        await handle.close()
-        logFileAccess(logging, 'handle.closed', { targetPath, fd })
-    } catch (error) {
-        logFileAccess(logging, 'handle.closeFailed', { targetPath, fd }, error)
-        throw error
-    }
+function unsupportedRuntime(): FileOperationError {
+    return new FileOperationError(
+        'Required filesystem operation is unavailable in this runtime',
+        'The language-server runtime must be updated before this file operation can run.'
+    )
 }
 
 export async function readCheckedFile(
@@ -79,25 +57,17 @@ export async function readCheckedFile(
     targetPath: string,
     logging?: DebugLogger
 ): Promise<string> {
-    // Use the workspace filesystem provider on Windows.
-    if (process.platform === 'win32') {
-        logFileAccess(logging, 'io.workspaceProvider', { targetPath, operation: 'read' })
-        return workspace.fs.readFile(targetPath)
-    }
-    const handle = await openRegularFile(targetPath, constants.O_RDONLY, logging)
     try {
-        const content = await handle.readFile({ encoding: 'utf8' })
-        logFileAccess(logging, 'io.completed', { targetPath, operation: 'read', fd: handle.fd })
-        return content
+        if (process.platform === 'win32') return await workspace.fs.readFile(targetPath)
+        const operation = (workspace.fs as GuardedFileSystem).readFileNoFollow
+        if (typeof operation !== 'function') throw unsupportedRuntime()
+        return await operation.call(workspace.fs, targetPath)
     } catch (error) {
-        logFileAccess(logging, 'io.failed', { targetPath, operation: 'read', fd: handle.fd }, error)
+        logFileAccess(logging, 'io.failed', { targetPath, operation: 'read' }, error)
         throw error
-    } finally {
-        await closeFile(handle, targetPath, logging)
     }
 }
 
-/** Compute and write through one handle, without truncation until the opened object has been checked. */
 export async function updateCheckedFile(
     workspace: Features['workspace'],
     targetPath: string,
@@ -105,44 +75,17 @@ export async function updateCheckedFile(
     options: { create?: boolean; readExisting?: boolean } = {},
     logging?: DebugLogger
 ): Promise<void> {
-    if (process.platform === 'win32') {
-        logFileAccess(logging, 'io.workspaceProvider', { targetPath, operation: 'update' })
-        const content = options.readExisting === false ? '' : await workspace.fs.readFile(targetPath)
-        await workspace.fs.writeFile(targetPath, transform(content))
-        return
-    }
-    let handle: FileHandle
     try {
-        handle = await openRegularFile(
-            targetPath,
-            options.readExisting === false ? constants.O_WRONLY : constants.O_RDWR,
-            logging
-        )
-    } catch (error) {
-        if (!options.create || (error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw error
+        if (process.platform === 'win32') {
+            const content = options.readExisting === false ? '' : await workspace.fs.readFile(targetPath)
+            await workspace.fs.writeFile(targetPath, transform(content))
+            return
         }
-        // Create the missing destination exclusively.
-        handle = await openRegularFile(targetPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL, logging)
-    }
-    try {
-        const existing = options.readExisting === false ? '' : await handle.readFile({ encoding: 'utf8' })
-        const content = Buffer.from(transform(existing), 'utf8')
-        // readFile advances the offset; positional writes must start from the beginning.
-        let offset = 0
-        while (offset < content.length) {
-            const { bytesWritten } = await handle.write(content, offset, content.length - offset, offset)
-            if (bytesWritten === 0) {
-                throw new Error('File write made no progress')
-            }
-            offset += bytesWritten
-        }
-        await handle.truncate(content.length)
-        logFileAccess(logging, 'io.completed', { targetPath, operation: 'update', fd: handle.fd })
+        const operation = (workspace.fs as GuardedFileSystem).updateFileNoFollow
+        if (typeof operation !== 'function') throw unsupportedRuntime()
+        await operation.call(workspace.fs, targetPath, transform, options)
     } catch (error) {
-        logFileAccess(logging, 'io.failed', { targetPath, operation: 'update', fd: handle.fd }, error)
+        logFileAccess(logging, 'io.failed', { targetPath, operation: 'update' }, error)
         throw error
-    } finally {
-        await closeFile(handle, targetPath, logging)
     }
 }

@@ -65,7 +65,11 @@ export class FsRead {
             if (!validation.canonicalPaths?.[0]) {
                 // The check could not resolve this path; refuse rather than
                 // proceed with a target the check did not evaluate.
-                return { requiresAcceptance: true, warning: validation.warning }
+                return {
+                    requiresAcceptance: true,
+                    warning: validation.warning,
+                    validationError: validation.validationError,
+                }
             }
             canonicalPaths.push(validation.canonicalPaths[0])
             if (validation.requiresAcceptance && !firstRequired) {

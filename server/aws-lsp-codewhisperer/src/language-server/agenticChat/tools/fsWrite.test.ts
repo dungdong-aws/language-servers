@@ -10,6 +10,7 @@ import { StubbedInstance } from 'ts-sinon'
 import * as sinon from 'sinon'
 import { LocalProjectContextController } from '../../../shared/localProjectContextController'
 import { URI } from 'vscode-uri'
+import { withGuardedFileOperations } from './guardedFileFixtures.test'
 
 describe('FsWrite Tool', function () {
     let tempFolder: testFolder.TestFolder
@@ -46,6 +47,7 @@ describe('FsWrite Tool', function () {
                         .catch(() => false),
             } as Workspace['fs'],
         } as StubbedInstance<Workspace>
+        withGuardedFileOperations(features.workspace.fs)
         tempFolder = await testFolder.TestFolder.create()
 
         // Set up LocalProjectContextController mock

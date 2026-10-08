@@ -67,12 +67,11 @@ export class FileSearch {
         targetPath: string,
         token?: CancellationToken
     ): Promise<InvokeOutput> {
-        const path = targetPath
         try {
             // Get all files and directories
             const listing = await workspaceUtils.readDirectoryRecursively(
                 { workspace: this.workspace, logging: this.logging },
-                path,
+                targetPath,
                 { maxDepth: params.maxDepth, excludeDirs: DEFAULT_EXCLUDE_DIRS, excludeFiles: DEFAULT_EXCLUDE_FILES },
                 token
             )
@@ -98,14 +97,14 @@ export class FileSearch {
 
             if (results.length === 0) {
                 return this.createOutput(
-                    `No files or directories matching queryName "${params.queryName}" found in ${path} with threshold`
+                    `No files or directories matching queryName "${params.queryName}" found in ${targetPath} with threshold`
                 )
             }
 
             return this.createOutput(results.join('\n'))
         } catch (error: any) {
-            this.logging.error(`Failed to search directory "${path}": ${error.message || error}`)
-            throw new Error(`Failed to search directory "${path}": ${error.message || error}`)
+            this.logging.error(`Failed to search directory "${targetPath}": ${error.message || error}`)
+            throw new Error(`Failed to search directory "${targetPath}": ${error.message || error}`)
         }
     }
 

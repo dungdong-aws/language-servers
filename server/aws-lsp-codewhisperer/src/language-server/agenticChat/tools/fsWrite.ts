@@ -107,11 +107,11 @@ export class FsWrite {
         })
     }
 
-    private async handleCreate(params: CreateParams, sanitizedPath: string): Promise<void> {
+    private async handleCreate(params: CreateParams, targetPath: string): Promise<void> {
         const content = params.fileText
         await updateCheckedFile(
             this.workspace,
-            sanitizedPath,
+            targetPath,
             () => content,
             { create: true, readExisting: false },
             this.logging
@@ -119,15 +119,15 @@ export class FsWrite {
 
         // Add created file to @Files list
         void LocalProjectContextController.getInstance().then(controller => {
-            const filePath = URI.file(sanitizedPath).fsPath
+            const filePath = URI.file(targetPath).fsPath
             return controller.updateIndexAndContextCommand([filePath], true)
         })
     }
 
-    private async handleAppend(params: AppendParams, sanitizedPath: string): Promise<void> {
+    private async handleAppend(params: AppendParams, targetPath: string): Promise<void> {
         await updateCheckedFile(
             this.workspace,
-            sanitizedPath,
+            targetPath,
             fileContent => getAppendContent(params, fileContent),
             {},
             this.logging

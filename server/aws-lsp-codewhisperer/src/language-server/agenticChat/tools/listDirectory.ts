@@ -70,11 +70,10 @@ export class ListDirectory {
         targetPath: string,
         token?: CancellationToken
     ): Promise<InvokeOutput> {
-        const path = targetPath
         try {
             const result = await workspaceUtils.readDirectoryWithTreeOutput(
                 { workspace: this.workspace, logging: this.logging },
-                path,
+                targetPath,
                 { maxDepth: params.maxDepth, excludeDirs: DEFAULT_EXCLUDE_DIRS, excludeFiles: DEFAULT_EXCLUDE_FILES },
                 token
             )
@@ -84,8 +83,8 @@ export class ListDirectory {
                 // bubble this up to the main agentic chat loop
                 throw error
             }
-            this.logging.error(`Failed to list directory "${path}": ${error.message || error}`)
-            throw new Error(`Failed to list directory "${path}": ${error.message || error}`)
+            this.logging.error(`Failed to list directory "${targetPath}": ${error.message || error}`)
+            throw new Error(`Failed to list directory "${targetPath}": ${error.message || error}`)
         }
     }
 

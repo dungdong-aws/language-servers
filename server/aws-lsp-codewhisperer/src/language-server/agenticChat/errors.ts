@@ -181,21 +181,34 @@ export class MultipleMatchesError extends FileOperationError {
  */
 export function createFileOperationError(error: Error): FileOperationError {
     const message = error.message
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ELOOP' || message.includes('ELOOP')) {
+        return new FileOperationError(
+            message,
+            'This file cannot be opened for the requested operation. Check the path and try again.'
+        )
+    }
+    if (code === 'EEXIST' || message.includes('EEXIST')) {
+        return new FileOperationError(
+            message,
+            'A file already exists at this destination. Review it before trying again.'
+        )
+    }
 
     // Common file system errors
-    if (message.includes('ENOENT') || message.includes('no such file or directory')) {
+    if (code === 'ENOENT' || message.includes('ENOENT') || message.includes('no such file or directory')) {
         return new DirectoryNotFoundError(message)
     }
-    if (message.includes('EACCES') || message.includes('permission denied')) {
+    if (code === 'EACCES' || code === 'EPERM' || message.includes('EACCES') || message.includes('permission denied')) {
         return new PermissionDeniedError(message)
     }
-    if (message.includes('EISDIR')) {
+    if (code === 'EISDIR' || message.includes('EISDIR')) {
         return new IsDirectoryError(message)
     }
-    if (message.includes('ENOSPC')) {
+    if (code === 'ENOSPC' || message.includes('ENOSPC')) {
         return new NoSpaceError(message)
     }
-    if (message.includes('EMFILE') || message.includes('ENFILE')) {
+    if (code === 'EMFILE' || code === 'ENFILE' || message.includes('EMFILE') || message.includes('ENFILE')) {
         return new TooManyOpenFilesError(message)
     }
 

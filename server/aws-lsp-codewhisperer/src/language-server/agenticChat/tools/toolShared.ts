@@ -5,6 +5,7 @@ import { sanitize } from '@aws/lsp-core/out/util/path'
 import * as fs from 'fs'
 import * as path from 'path'
 import { CommandCategory } from './executeBash'
+import { EmptyPathError } from '../errors'
 
 const resolvedTargets = new WeakMap<object, { toolName: string; paths: string[] }>()
 
@@ -191,6 +192,7 @@ export interface CommandValidation {
      * looked.
      */
     canonicalPaths?: string[]
+    validationError?: Error
 }
 
 export async function validatePath(path: string, exists: (p: string) => Promise<boolean>) {
@@ -300,8 +302,8 @@ export async function requiresPathAcceptance(
     options?: PathAcceptanceOptions
 ): Promise<CommandValidation> {
     try {
-        if (!inputPath || !inputPath.trim()) {
-            throw new Error('Path cannot be empty.')
+        if (typeof inputPath !== 'string' || !inputPath.trim()) {
+            throw new EmptyPathError()
         }
         // Canonicalize in a symlink-aware way before the workspace-boundary
         // check: a link whose name sits inside the workspace can point outside
@@ -370,7 +372,7 @@ export async function requiresPathAcceptance(
         }
         // In case of error, safer to require acceptance. No canonical path is
         // returned, so a caller that needs one to proceed will refuse.
-        return { requiresAcceptance: true }
+        return { requiresAcceptance: true, validationError: error instanceof Error ? error : new Error(String(error)) }
     }
 }
 

@@ -33,6 +33,7 @@ import { AmazonQTokenServiceManager } from '../../../shared/amazonQServiceManage
 import { SERVICE_MANAGER_TIMEOUT_MS, SERVICE_MANAGER_POLL_INTERVAL_MS } from '../constants/constants'
 import { isUsingIAMAuth } from '../../../shared/utils'
 
+/** Register handlers for inputs prepared with withResolvedTargets after acceptance. */
 export const FsToolsServer: Server = ({ workspace, logging, agent, lsp }) => {
     const fsReadTool = new FsRead({ workspace, lsp, logging })
     const fsWriteTool = new FsWrite({ workspace, lsp, logging })

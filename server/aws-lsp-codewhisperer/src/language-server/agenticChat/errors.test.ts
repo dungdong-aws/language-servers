@@ -55,6 +55,24 @@ describe('errors', () => {
             assert.ok(error5 instanceof TooManyOpenFilesError)
         })
 
+        it('maps errno codes when the original message has no code prefix', () => {
+            const cases = [
+                ['ENOENT', 'The directory does not exist.'],
+                ['EACCES', 'Permission denied.'],
+                ['EPERM', 'Permission denied.'],
+                ['EISDIR', 'The specified path is a directory, not a file.'],
+                ['ENOSPC', 'No space left on device.'],
+                ['EMFILE', 'Too many open files.'],
+                ['ENFILE', 'Too many open files.'],
+            ]
+            for (const [code, message] of cases) {
+                assert.strictEqual(
+                    getCustomerFacingErrorMessage(Object.assign(new Error('Operation failed'), { code })),
+                    message
+                )
+            }
+        })
+
         it('maps fsWrite specific errors', () => {
             const error1 = createFileOperationError(new Error('Path must not be empty'))
             assert.ok(error1 instanceof EmptyPathError)
@@ -97,6 +115,17 @@ describe('errors', () => {
     })
 
     describe('getCustomerFacingErrorMessage', () => {
+        it('maps file-open and exclusive-create errors without claiming the target changed', () => {
+            const loop = Object.assign(new Error('internal open details'), { code: 'ELOOP' })
+            assert.strictEqual(
+                getCustomerFacingErrorMessage(loop),
+                'This file cannot be opened for the requested operation. Check the path and try again.'
+            )
+            assert.strictEqual(
+                getCustomerFacingErrorMessage(new Error('EEXIST: internal destination')),
+                'A file already exists at this destination. Review it before trying again.'
+            )
+        })
         it('returns customer message from FileOperationError', () => {
             const error = new EmptyPathError()
             assert.strictEqual(getCustomerFacingErrorMessage(error), 'The file path cannot be empty.')

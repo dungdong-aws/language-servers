@@ -8,6 +8,7 @@ import { Workspace } from '@aws/language-server-runtimes/server-interface'
 import { StubbedInstance } from 'ts-sinon'
 import { FsReplace, ReplaceParams } from './fsReplace'
 import * as os from 'os'
+import { withGuardedFileOperations } from './guardedFileFixtures.test'
 
 describe('FsReplace Tool', function () {
     let tempFolder: testFolder.TestFolder
@@ -34,6 +35,7 @@ describe('FsReplace Tool', function () {
                         .catch(() => false),
             } as Workspace['fs'],
         } as StubbedInstance<Workspace>
+        withGuardedFileOperations(features.workspace.fs)
         tempFolder = await testFolder.TestFolder.create()
     })
 

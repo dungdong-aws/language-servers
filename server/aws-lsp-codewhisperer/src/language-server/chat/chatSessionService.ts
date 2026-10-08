@@ -21,7 +21,7 @@ import { TokenLimits, TokenLimitsCalculator } from '../agenticChat/utils/tokenLi
 import { Model } from '@aws/language-server-runtimes/protocol'
 
 export type ChatSessionServiceConfig = CodeWhispererStreamingClientConfig
-type FileChange = { before?: string; after?: string }
+type FileChange = { before?: string; after?: string; targetPath?: string }
 
 type DeferredHandler = {
     resolve: () => void

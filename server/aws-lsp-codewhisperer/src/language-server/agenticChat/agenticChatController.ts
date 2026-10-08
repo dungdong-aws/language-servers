@@ -161,7 +161,7 @@ import {
 import { ContextCommandsProvider } from './context/contextCommandsProvider'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError, workspaceUtils } from '@aws/lsp-core'
-import { logFileAccess } from './tools/checkedFileIo'
+import { logFileAccess, readCheckedFile, updateCheckedFile } from './tools/checkedFileIo'
 import { FsRead, FsReadParams } from './tools/fsRead'
 import { ListDirectory, ListDirectoryParams } from './tools/listDirectory'
 import { FsWrite, FsWriteParams } from './tools/fsWrite'
@@ -172,6 +172,7 @@ import {
     InvokeOutput,
     discardResolvedTargets,
     withResolvedTargets,
+    resolveCanonicalPath,
     resolveSymlinkAwarePath,
     ToolApprovalException,
 } from './tools/toolShared'
@@ -463,7 +464,7 @@ export class AgenticChatController implements ChatHandlers {
                     this.#abTestingAllocation?.userVariation
                 )
             } catch (err: any) {
-                return { success: false, failureReason: err.message }
+                return { success: false, failureReason: getCustomerFacingErrorMessage(err) }
             }
             return {
                 success: true,
@@ -494,17 +495,58 @@ export class AgenticChatController implements ChatHandlers {
         }
     }
 
+    async #getFileChangeDocument(requestedPath: string, targetPath: string, useWorkspace: boolean) {
+        if (useWorkspace) {
+            const documentTarget =
+                requestedPath === targetPath
+                    ? targetPath
+                    : await resolveCanonicalPath(requestedPath).catch(() => undefined)
+            if (documentTarget === targetPath) {
+                const document = await this.#triggerContext.getTextDocumentFromPath(requestedPath, true, false)
+                if (document) return document
+            }
+            if (requestedPath !== targetPath) {
+                const canonicalDocument = await this.#triggerContext.getTextDocumentFromPath(targetPath, true, false)
+                if (canonicalDocument) return canonicalDocument
+            }
+        }
+        try {
+            const content = await readCheckedFile(this.#features.workspace, targetPath, this.#features.logging)
+            return TextDocument.create(requestedPath, '', 0, content)
+        } catch (error) {
+            logFileAccess(this.#features.logging, 'snapshot.unavailable', { targetPath }, error)
+            if (useWorkspace && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+            return undefined
+        }
+    }
+
     async #undoFileChange(toolUseId: string, session: ChatSessionService | undefined): Promise<void> {
         this.#log(`Reverting file change for tooluseId: ${toolUseId}`)
         const toolUse = session?.toolUseLookup.get(toolUseId)
 
         const input = toolUse?.input as unknown as FsWriteParams | FsReplaceParams
-        if (toolUse?.fileChange?.before) {
-            await this.#features.workspace.fs.writeFile(input.path, toolUse.fileChange.before)
+        const change = toolUse?.fileChange
+        if (!change || !input?.path) {
+            throw new Error('No recorded file change is available to undo.')
+        }
+        const targetPath = change.targetPath ?? input.path
+        const previousContent = change.before
+        if (previousContent !== undefined) {
+            if (change.targetPath) {
+                await updateCheckedFile(
+                    this.#features.workspace,
+                    targetPath,
+                    () => previousContent,
+                    { create: true, readExisting: false },
+                    this.#features.logging
+                )
+            } else {
+                await this.#features.workspace.fs.writeFile(targetPath, previousContent)
+            }
         } else {
-            await this.#features.workspace.fs.rm(input.path)
+            await this.#features.workspace.fs.rm(targetPath)
             void LocalProjectContextController.getInstance().then(controller => {
-                const filePath = URI.file(input.path).fsPath
+                const filePath = URI.file(targetPath).fsPath
                 return controller.updateIndexAndContextCommand([filePath], false)
             })
         }
@@ -2078,8 +2120,14 @@ export class AgenticChatController implements ChatHandlers {
                         const approvedPaths = session.approvedPaths
 
                         // Pass the approved paths to the tool's requiresAcceptance method
-                        const { requiresAcceptance, warning, commandCategory, acceptanceReason, canonicalPaths } =
-                            await tool.requiresAcceptance(toolUse.input as any, approvedPaths)
+                        const {
+                            requiresAcceptance,
+                            warning,
+                            commandCategory,
+                            acceptanceReason,
+                            canonicalPaths,
+                            validationError,
+                        } = await tool.requiresAcceptance(toolUse.input as any, approvedPaths)
 
                         // Filesystem execution requires the canonical targets returned by acceptance.
                         const isFsTool = [FS_READ, FS_WRITE, FS_REPLACE, FILE_SEARCH, LIST_DIRECTORY].includes(
@@ -2093,16 +2141,9 @@ export class AgenticChatController implements ChatHandlers {
                                 requiresAcceptance,
                             })
                             if (!canonicalPaths?.length) {
-                                throw new Error(`Could not resolve the path for ${toolUse.name}`)
+                                throw validationError ?? new Error(`Could not resolve the path for ${toolUse.name}`)
                             }
                             checkedCanonicalPaths = [...canonicalPaths]
-                            // Previews, confirmation and subsequent file references use the checked targets too.
-                            toolUse.input = {
-                                ...(toolUse.input as object),
-                                ...(toolUse.name === FS_READ
-                                    ? { paths: [...canonicalPaths] }
-                                    : { path: canonicalPaths[0] }),
-                            }
                         }
 
                         // Honor built-in permission if available, otherwise use tool's requiresAcceptance
@@ -2110,8 +2151,19 @@ export class AgenticChatController implements ChatHandlers {
 
                         if (requiresAcceptance || toolUse.name === EXECUTE_BASH) {
                             // for executeBash, we till send the confirmation message without action buttons
+                            const confirmationToolUse: ToolUse = checkedCanonicalPaths
+                                ? {
+                                      ...toolUse,
+                                      input: {
+                                          ...(toolUse.input as object),
+                                          ...(toolUse.name === FS_READ
+                                              ? { paths: [...checkedCanonicalPaths] }
+                                              : { path: checkedCanonicalPaths[0] }),
+                                      },
+                                  }
+                                : toolUse
                             const confirmationResult = this.#processToolConfirmation(
-                                toolUse,
+                                confirmationToolUse,
                                 requiresAcceptance,
                                 warning,
                                 commandCategory,
@@ -2242,13 +2294,18 @@ export class AgenticChatController implements ChatHandlers {
                         break
                 }
 
+                if (checkedCanonicalPaths && token?.isCancellationRequested) {
+                    throw new CancellationError('user')
+                }
                 if (toolUse.name === FS_WRITE || toolUse.name === FS_REPLACE) {
                     const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-                    const document = await this.#triggerContext.getTextDocumentFromPath(input.path, true, true)
+                    const targetPath = checkedCanonicalPaths?.[0]
+                    if (!targetPath) throw new Error('No checked target is available for this file operation.')
+                    const document = await this.#getFileChangeDocument(input.path, targetPath, true)
 
                     session.toolUseLookup.set(toolUse.toolUseId, {
                         ...toolUse,
-                        fileChange: { before: document?.getText() },
+                        fileChange: { targetPath, before: document?.getText() },
                     })
                 }
 
@@ -2401,7 +2458,9 @@ export class AgenticChatController implements ChatHandlers {
                         // will only update their file contents (which
                         // then propagates to the LSP) if/when that
                         // document receives focus.
-                        const doc = await this.#triggerContext.getTextDocumentFromPath(input.path, false, true)
+                        const targetPath = checkedCanonicalPaths?.[0]
+                        if (!targetPath) throw new Error('No checked target is available for this file operation.')
+                        const doc = await this.#getFileChangeDocument(input.path, targetPath, false)
                         const chatResult = await this.#getFsWriteChatResult(toolUse, doc, session)
                         const cachedToolUse = session.toolUseLookup.get(toolUse.toolUseId)
                         if (cachedToolUse) {
@@ -2673,7 +2732,19 @@ export class AgenticChatController implements ChatHandlers {
                 results.push({
                     toolUseId: toolUse.toolUseId,
                     status: ToolResultStatus.ERROR,
-                    content: [{ json: { error: err instanceof Error ? err.message : 'Unknown error' } }],
+                    content: [
+                        {
+                            json: {
+                                error: [FS_READ, FS_WRITE, FS_REPLACE, FILE_SEARCH, LIST_DIRECTORY].includes(
+                                    toolUse.name
+                                )
+                                    ? getCustomerFacingErrorMessage(err)
+                                    : err instanceof Error
+                                      ? err.message
+                                      : 'Unknown error',
+                            },
+                        },
+                    ],
                 })
             } finally {
                 if (executionInput) {
@@ -4091,7 +4162,7 @@ export class AgenticChatController implements ChatHandlers {
             if (toolUse?.name === FS_WRITE || toolUse?.name === FS_REPLACE) {
                 const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
                 this.#features.lsp.workspace.openFileDiff({
-                    originalFileUri: input.path,
+                    originalFileUri: toolUse.fileChange?.targetPath ?? input.path,
                     originalFileContent: toolUse.fileChange?.before,
                     isDeleted: false,
                     fileContent: toolUse.fileChange?.after,
