@@ -14,6 +14,7 @@ import { FsWrite } from './tools/fsWrite'
 import { FsReplace } from './tools/fsReplace'
 import { withGuardedFileOperations } from './tools/guardedFileFixtures.test'
 import { BUTTON_UNDO_CHANGES } from './constants/toolConstants'
+import * as pathValidation from './utils/pathValidation'
 import * as path from 'path'
 import * as chokidar from 'chokidar'
 import {
@@ -3654,7 +3655,32 @@ ${' '.repeat(8)}}
             sinon.assert.calledOnce(run)
             sinon.assert.calledOnceWithExactly(session.addApprovedPath, target, 'fsRead')
             assert.deepStrictEqual(toolUse.input, { paths: ['original-alias'] })
-            assert.ok(JSON.stringify(stream.writeResultBlock.firstCall.args[0]).includes(target))
+            const confirmation = stream.writeResultBlock.firstCall.args[0] as ChatResult
+            assert.ok(confirmation.body?.includes(target))
+        })
+
+        it('preserves literal Windows paths in the permission body', async () => {
+            const windowsTarget = 'C:\\workspace\\notes.txt'
+            const validate = sinon.stub(pathValidation, 'validatePaths')
+            check.resolves({ requiresAcceptance: true, canonicalPaths: [windowsTarget] })
+            sinon.stub(chatController, 'waitForToolApproval').resolves()
+            run.callsFake(async (name: string, input: object) => {
+                assert.deepStrictEqual(requireResolvedTargets(input, name, 1), [windowsTarget])
+                return { output: { kind: 'json', content: [] } }
+            })
+            const toolUse = request()
+            const results = await chatController.processToolUses(
+                [toolUse],
+                stream,
+                session,
+                'tabId',
+                mockCancellationToken
+            )
+            sinon.assert.calledOnceWithExactly(validate, [windowsTarget])
+            const confirmation = stream.writeResultBlock.firstCall.args[0] as ChatResult
+            assert.ok(confirmation.body?.includes(windowsTarget))
+            assert.strictEqual(results[0].status, 'success')
+            assert.deepStrictEqual(toolUse.input, { paths: ['original-alias'] })
         })
 
         it('does not execute or cache approval after rejection', async () => {

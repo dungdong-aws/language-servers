@@ -3,6 +3,7 @@ import * as sinon from 'sinon'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
 import { GuardedFileSystem, readCheckedFile, updateCheckedFile, logFileAccess } from './checkedFileIo'
 import { FileOperationError } from '../errors'
+import { withGuardedFileOperations } from './guardedFileFixtures.test'
 
 describe('checked file runtime delegation', () => {
     let features: TestFeatures
@@ -83,6 +84,17 @@ describe('checked file runtime delegation', () => {
         sinon.assert.calledWithExactly(rawWrite, 'new-target', 'new')
         sinon.assert.notCalled(read)
         sinon.assert.notCalled(update)
+    })
+
+    it('keeps Windows fixtures on the existing provider without adding guarded methods', async () => {
+        platform.value('win32')
+        delete filesystem.readFileNoFollow
+        delete filesystem.updateFileNoFollow
+        assert.strictEqual(withGuardedFileOperations(filesystem), filesystem)
+        assert.strictEqual(filesystem.readFileNoFollow, undefined)
+        assert.strictEqual(filesystem.updateFileNoFollow, undefined)
+        assert.strictEqual(await readCheckedFile(features.workspace, 'checked-target'), 'before')
+        sinon.assert.calledOnceWithExactly(rawRead, 'checked-target')
     })
 
     it('does not write when a Windows transform fails', async () => {
