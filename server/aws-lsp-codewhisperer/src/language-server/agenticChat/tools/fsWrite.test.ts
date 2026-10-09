@@ -4,14 +4,14 @@ import * as path from 'path'
 import * as assert from 'assert'
 import * as fs from 'fs/promises'
 import { InvokeOutput } from './toolShared'
-import { checkedTarget as resolveCanonicalPath } from './guardedFileFixtures.test'
+import { checkedTarget as resolveCanonicalPath } from './checkedFileFixtures.test'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
 import { Workspace } from '@aws/language-server-runtimes/server-interface'
 import { StubbedInstance } from 'ts-sinon'
 import * as sinon from 'sinon'
 import { LocalProjectContextController } from '../../../shared/localProjectContextController'
 import { URI } from 'vscode-uri'
-import { withGuardedFileOperations } from './guardedFileFixtures.test'
+import { withCheckedFileOperations } from './checkedFileFixtures.test'
 
 describe('FsWrite Tool', function () {
     let tempFolder: testFolder.TestFolder
@@ -48,7 +48,7 @@ describe('FsWrite Tool', function () {
                         .catch(() => false),
             } as Workspace['fs'],
         } as StubbedInstance<Workspace>
-        features.workspace.fs = withGuardedFileOperations(features.workspace.fs) as typeof features.workspace.fs
+        features.workspace.fs = withCheckedFileOperations(features.workspace.fs) as typeof features.workspace.fs
         tempFolder = await testFolder.TestFolder.create()
 
         // Set up LocalProjectContextController mock

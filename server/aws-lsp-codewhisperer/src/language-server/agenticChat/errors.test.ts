@@ -1,5 +1,5 @@
 import * as assert from 'assert'
-import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
+import { FileUpdateError } from '@aws/language-server-runtimes/server-interface'
 import {
     AgenticChatError,
     DirectoryNotFoundError,
@@ -162,6 +162,25 @@ describe('errors', () => {
                 complete: false,
             })
             assert.ok(getCustomerFacingErrorMessage(error).includes('No space left on device.'))
+            assert.ok(getCustomerFacingErrorMessage(error).includes('may already contain changes'))
+            assert.ok(
+                getModelFacingFileError(error, { path: 'requested-alias' }).includes('do not repeat the edit blindly')
+            )
+        })
+
+        it('still warns when the error comes from a second copy of the runtime package', () => {
+            // A duplicate install gives the runtime its own FileUpdateError class; the warning must not depend on instanceof.
+            const modulePath = require.resolve('@aws/language-server-runtimes/server-interface/checkedFile')
+            const cached = require.cache[modulePath]
+            delete require.cache[modulePath]
+            const duplicate: typeof import('@aws/language-server-runtimes/server-interface/checkedFile') = require('@aws/language-server-runtimes/server-interface/checkedFile')
+            require.cache[modulePath] = cached
+            assert.notStrictEqual(duplicate.FileUpdateError, FileUpdateError, 'test setup must load a second copy')
+            const error = new duplicate.FileUpdateError(Object.assign(new Error('Disk full'), { code: 'ENOSPC' }), {
+                mayHaveChanged: true,
+                complete: false,
+            })
+            assert.strictEqual(error instanceof FileUpdateError, false)
             assert.ok(getCustomerFacingErrorMessage(error).includes('may already contain changes'))
             assert.ok(
                 getModelFacingFileError(error, { path: 'requested-alias' }).includes('do not repeat the edit blindly')

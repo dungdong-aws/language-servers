@@ -3,11 +3,10 @@ import {
     CheckedFileOperations,
     CheckedFileTarget,
     FileUpdateOutcome,
-} from '@aws/language-server-runtimes/server-interface/checkedFile'
+} from '@aws/language-server-runtimes/server-interface'
 import { FileOperationError } from '../errors'
 
 export type CheckedTarget = CheckedFileTarget | Readonly<{ path: string; state: 'unverified' }>
-export type GuardedFileSystem = Features['workspace']['fs']
 type DebugLogger = Pick<Features['logging'], 'debug'>
 
 /** Diagnostic failures must not change the operation. Never pass content or full tool inputs here. */
@@ -43,16 +42,21 @@ export function logFileAccess(
     }
 }
 
+/** Lowest `checkedFiles` contract version this consumer needs; later versions are additive. */
+const REQUIRED_CHECKED_FILES_VERSION = 1
+
 function checkedFiles(workspace: Features['workspace']): CheckedFileOperations {
     const operations = workspace.fs.checkedFiles
     if (
-        operations?.version !== 1 ||
+        typeof operations?.version !== 'number' ||
+        !Number.isInteger(operations.version) ||
+        operations.version < REQUIRED_CHECKED_FILES_VERSION ||
         typeof operations.capture !== 'function' ||
         typeof operations.read !== 'function' ||
         typeof operations.update !== 'function'
     ) {
         throw new FileOperationError(
-            'Required filesystem contract version 1 is unavailable in this runtime',
+            `Filesystem contract version ${REQUIRED_CHECKED_FILES_VERSION} or later with capture, read, and update is unavailable in this runtime`,
             'The language-server runtime must be updated before this file operation can run.'
         )
     }

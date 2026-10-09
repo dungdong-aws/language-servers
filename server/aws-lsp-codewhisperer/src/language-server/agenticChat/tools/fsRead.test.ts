@@ -6,7 +6,7 @@ import { TestFeatures } from '@aws/language-server-runtimes/testing'
 import { TextDocument, Workspace } from '@aws/language-server-runtimes/server-interface'
 import { testFolder } from '@aws/lsp-core'
 import { StubbedInstance } from 'ts-sinon'
-import { withGuardedFileOperations, checkedTarget } from './guardedFileFixtures.test'
+import { withCheckedFileOperations, checkedTarget } from './checkedFileFixtures.test'
 
 describe('FsRead Tool', () => {
     let features: TestFeatures
@@ -27,7 +27,7 @@ describe('FsRead Tool', () => {
                         .catch(() => false),
             } as Workspace['fs'],
         } as StubbedInstance<Workspace>
-        features.workspace.fs = withGuardedFileOperations(features.workspace.fs) as typeof features.workspace.fs
+        features.workspace.fs = withCheckedFileOperations(features.workspace.fs) as typeof features.workspace.fs
         tempFolder = await testFolder.TestFolder.create()
     })
 

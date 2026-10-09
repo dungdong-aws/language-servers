@@ -3,7 +3,7 @@ import * as sinon from 'sinon'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
 import { captureCheckedTarget, CheckedTarget, readCheckedFile, updateCheckedFile, logFileAccess } from './checkedFileIo'
 import { FileOperationError } from '../errors'
-import { withGuardedFileOperations } from './guardedFileFixtures.test'
+import { withCheckedFileOperations } from './checkedFileFixtures.test'
 
 describe('checked file runtime delegation', () => {
     const target: CheckedTarget = { path: 'checked-target', state: 'existing', dev: '1', ino: '2', linkCount: '1' }
@@ -52,7 +52,14 @@ describe('checked file runtime delegation', () => {
     })
 
     it('rejects absent, incompatible, and incomplete contracts before ordinary I/O', async () => {
-        for (const capability of [undefined, { version: 0, read, update, capture }, { version: 1, read, capture }]) {
+        for (const capability of [
+            undefined,
+            { version: 0, read, update, capture },
+            { version: '1', read, update, capture },
+            { version: 1.5, read, update, capture },
+            { version: NaN, read, update, capture },
+            { version: 1, read, capture },
+        ]) {
             features.workspace.fs.checkedFiles = capability as any
             await assert.rejects(captureCheckedTarget(features.workspace, target.path), FileOperationError)
             await assert.rejects(readCheckedFile(features.workspace, target), FileOperationError)
@@ -63,6 +70,13 @@ describe('checked file runtime delegation', () => {
         }
         sinon.assert.notCalled(rawRead)
         sinon.assert.notCalled(rawWrite)
+    })
+
+    it('accepts a later additive contract version', async () => {
+        features.workspace.fs.checkedFiles = { version: 2, read, update, capture }
+        assert.strictEqual(await readCheckedFile(features.workspace, target), 'fixture')
+        sinon.assert.calledOnceWithExactly(read, target)
+        sinon.assert.notCalled(rawRead)
     })
 
     it('rejects unverified POSIX targets instead of capturing late or falling back', async () => {
@@ -77,7 +91,7 @@ describe('checked file runtime delegation', () => {
         sinon.assert.notCalled(rawWrite)
     })
 
-    it('preserves runtime errors without an unguarded fallback', async () => {
+    it('preserves runtime errors without an unchecked fallback', async () => {
         const failure = Object.assign(new Error('Open failed'), { code: 'ESTALE' })
         read.rejects(failure)
         update.rejects(failure)
@@ -90,7 +104,7 @@ describe('checked file runtime delegation', () => {
         sinon.assert.notCalled(rawWrite)
     })
 
-    it('retains the Windows provider without exposing guarded operations in fixtures', async () => {
+    it('retains the Windows provider without exposing checked operations in fixtures', async () => {
         platform.value('win32')
         const windowsTarget = await captureCheckedTarget(features.workspace, 'C:\\workspace\\file.txt')
         assert.strictEqual(windowsTarget.state, 'unverified')
@@ -103,7 +117,7 @@ describe('checked file runtime delegation', () => {
         sinon.assert.notCalled(capture)
         sinon.assert.notCalled(read)
         sinon.assert.notCalled(update)
-        const fixture = withGuardedFileOperations(features.workspace.fs)
+        const fixture = withCheckedFileOperations(features.workspace.fs)
         assert.notStrictEqual(fixture, features.workspace.fs)
         assert.strictEqual(fixture.checkedFiles, undefined)
         assert.ok(features.workspace.fs.checkedFiles)

@@ -91,6 +91,7 @@ import {
     TabRemoveParams,
     TabChangeParams,
     InlineChatResult,
+    isFileUpdateError,
 } from '@aws/language-server-runtimes/server-interface'
 import { v4 as uuid } from 'uuid'
 import {
@@ -162,7 +163,6 @@ import { ContextCommandsProvider } from './context/contextCommandsProvider'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError, workspaceUtils } from '@aws/lsp-core'
 import { CheckedTarget, logFileAccess, readCheckedFile, updateCheckedFile } from './tools/checkedFileIo'
-import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
 import { FsRead, FsReadParams } from './tools/fsRead'
 import { ListDirectory, ListDirectoryParams } from './tools/listDirectory'
 import { FsWrite, FsWriteParams } from './tools/fsWrite'
@@ -2579,7 +2579,7 @@ export class AgenticChatController implements ChatHandlers {
                     )
                 }
             } catch (err) {
-                if (err instanceof FileUpdateError && err.outcome.mayHaveChanged && toolUse.toolUseId) {
+                if (isFileUpdateError(err) && err.outcome.mayHaveChanged && toolUse.toolUseId) {
                     const cached = session.toolUseLookup.get(toolUse.toolUseId)
                     if (cached?.fileChange) {
                         const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
@@ -2715,7 +2715,7 @@ export class AgenticChatController implements ChatHandlers {
                         const customerFacingError = getCustomerFacingErrorMessage(err)
                         const change = session.toolUseLookup.get(toolUse.toolUseId)?.fileChange
                         const canUndoPartial =
-                            err instanceof FileUpdateError &&
+                            isFileUpdateError(err) &&
                             err.outcome.mayHaveChanged &&
                             change?.target !== undefined &&
                             change.before !== undefined &&

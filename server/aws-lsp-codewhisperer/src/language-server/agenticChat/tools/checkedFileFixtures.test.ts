@@ -4,7 +4,7 @@ import { captureCheckedTarget } from './checkedFileIo'
 import { resolveCanonicalPath } from './toolShared'
 
 /** Use the public runtime testing seam without mutating the provider shared by other fixtures. */
-export function withGuardedFileOperations(filesystem: Features['workspace']['fs']): Features['workspace']['fs'] {
+export function withCheckedFileOperations(filesystem: Features['workspace']['fs']): Features['workspace']['fs'] {
     const operations = createCheckedFileOperations()
     return { ...filesystem, checkedFiles: operations ? { ...operations } : undefined }
 }

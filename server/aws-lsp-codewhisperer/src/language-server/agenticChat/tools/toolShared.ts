@@ -7,7 +7,7 @@ import * as path from 'path'
 import { CommandCategory } from './executeBash'
 import { EmptyPathError } from '../errors'
 import { captureCheckedTarget, CheckedTarget } from './checkedFileIo'
-import { FileUpdateOutcome } from '@aws/language-server-runtimes/server-interface/checkedFile'
+import { FileUpdateOutcome } from '@aws/language-server-runtimes/server-interface'
 
 const resolvedTargets = new WeakMap<object, { toolName: string; targets: readonly CheckedTarget[] }>()
 const fileUpdates = new WeakMap<object, FileUpdateOutcome>()

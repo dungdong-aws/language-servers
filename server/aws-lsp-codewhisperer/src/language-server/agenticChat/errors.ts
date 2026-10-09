@@ -1,5 +1,5 @@
 import { CodeWhispererStreamingServiceException } from '@amzn/codewhisperer-streaming'
-import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
+import { isFileUpdateError } from '@aws/language-server-runtimes/server-interface'
 
 type AgenticChatErrorCode =
     | 'QModelResponse' // generic backend error.
@@ -262,7 +262,7 @@ export function createFileOperationError(error: Error): FileOperationError {
  * @returns A customer-facing error message
  */
 export function getCustomerFacingErrorMessage(error: unknown): string {
-    if (error instanceof FileUpdateError) {
+    if (isFileUpdateError(error)) {
         const message = getCustomerFacingErrorMessage(error.cause)
         return error.outcome.mayHaveChanged
             ? `${message} The file may already contain changes. Review it before retrying.`
@@ -284,7 +284,7 @@ export function getModelFacingFileError(error: unknown, input: unknown): string 
     const requested = typeof params?.path === 'string' ? params.path : params?.paths
     const detail = error instanceof Error ? error.message : String(error)
     const warning =
-        error instanceof FileUpdateError && error.outcome.mayHaveChanged
+        isFileUpdateError(error) && error.outcome.mayHaveChanged
             ? ' The file may already contain changes. Read and review it before retrying; do not repeat the edit blindly.'
             : ''
     return `${requested === undefined ? '' : `Requested path(s): ${JSON.stringify(requested)}. `}${detail}${warning}`

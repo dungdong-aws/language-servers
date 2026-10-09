@@ -10,10 +10,9 @@ import * as os from 'os'
 import { URI } from 'vscode-uri'
 import { newAgent } from '@aws/language-server-runtimes/runtimes/agent'
 import { FsToolsServer } from './tools/toolServer'
-import { FileUpdateError } from '@aws/language-server-runtimes/server-interface/checkedFile'
 import { FsWrite } from './tools/fsWrite'
 import { FsReplace } from './tools/fsReplace'
-import { withGuardedFileOperations } from './tools/guardedFileFixtures.test'
+import { withCheckedFileOperations } from './tools/checkedFileFixtures.test'
 import { BUTTON_UNDO_CHANGES, BUTTON_UNDO_ALL_CHANGES, SUFFIX_UNDOALL } from './constants/toolConstants'
 import * as pathValidation from './utils/pathValidation'
 import * as path from 'path'
@@ -47,6 +46,7 @@ import {
     ContextCommand,
     ChatUpdateParams,
     ConnectionMetadata,
+    FileUpdateError,
 } from '@aws/language-server-runtimes/server-interface'
 import { Model } from '@aws/language-server-runtimes/protocol'
 import { TestFeatures } from '@aws/language-server-runtimes/testing'
@@ -3803,7 +3803,7 @@ ${' '.repeat(8)}}
                 writeFile: (file: string, content: string) => fs.writeFile(file, content),
                 rm: (file: string) => fs.rm(file),
             })
-            testFeatures.workspace.fs = withGuardedFileOperations(
+            testFeatures.workspace.fs = withCheckedFileOperations(
                 testFeatures.workspace.fs
             ) as typeof testFeatures.workspace.fs
             // Retain real runtime dispatch, schema validation, tool validation, and file I/O.
