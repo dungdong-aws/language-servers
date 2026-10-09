@@ -3639,6 +3639,16 @@ ${' '.repeat(8)}}
         })
 
         it('derives the tool name mapping from enabled tools so a disabled tool cannot claim a name', async () => {
+            testFeatures.setClientParams({
+                initializationOptions: {
+                    aws: {
+                        awsClientCapabilities: {
+                            q: { mcp: true },
+                        },
+                    },
+                },
+            } as any)
+
             // Two servers advertise `search`. Only serverB's copy is enabled, so
             // toolServer registers it under the bare name `search`. If the mapping
             // were derived from all tools, the disabled serverA copy would be seen
