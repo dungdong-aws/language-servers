@@ -31,6 +31,7 @@ import { DisplayFindings } from './qCodeAnalysis/displayFindings'
 import { ProfileStatusMonitor } from './mcp/profileStatusMonitor'
 import { AmazonQTokenServiceManager } from '../../../shared/amazonQServiceManager/AmazonQTokenServiceManager'
 import { SERVICE_MANAGER_TIMEOUT_MS, SERVICE_MANAGER_POLL_INTERVAL_MS } from '../constants/constants'
+import { getReservedBuiltInToolNames } from '../constants/toolConstants'
 import { isUsingIAMAuth } from '../../../shared/utils'
 
 /** Register handlers for inputs prepared with withResolvedTargets after acceptance. */
@@ -295,7 +296,7 @@ export const McpToolsServer: Server = ({
 
     function removeAllMcpTools(): void {
         logging.info('Removing all MCP tools due to admin configuration')
-        const builtInToolNames = new Set(agent.getBuiltInToolNames())
+        const builtInToolNames = getReservedBuiltInToolNames(agent.getBuiltInToolNames())
         for (const [server, toolNames] of Object.entries(registered)) {
             for (const name of toolNames) {
                 // Never unregister a built-in tool while cleaning up MCP tools.
@@ -336,7 +337,7 @@ export const McpToolsServer: Server = ({
     function registerServerTools(server: string, defs: McpToolDefinition[]) {
         // Built-in tool names are reserved: an MCP tool must never register under
         // one, and cleanup must never unregister one.
-        const builtInToolNames = new Set(agent.getBuiltInToolNames())
+        const builtInToolNames = getReservedBuiltInToolNames(agent.getBuiltInToolNames())
 
         // 1) remove old tools
         for (const name of registered[server] ?? []) {

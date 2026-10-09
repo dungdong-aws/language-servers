@@ -34,15 +34,7 @@ import {
     isUsableToolExecTimeout,
     resolveMcpRequestTimeoutMs,
 } from './mcpUtils'
-import {
-    EXECUTE_BASH,
-    FILE_SEARCH,
-    FS_READ,
-    FS_REPLACE,
-    FS_WRITE,
-    GREP_SEARCH,
-    LIST_DIRECTORY,
-} from '../../constants/toolConstants'
+import { getReservedBuiltInToolNames, STATIC_BUILT_IN_TOOL_NAMES } from '../../constants/toolConstants'
 import type { MCPServerConfig } from './mcpTypes'
 import { McpPermissionType } from './mcpTypes'
 import { pathToFileURL } from 'url'
@@ -528,7 +520,7 @@ describe('createNamespacedToolName', () => {
 
     it('adds server prefix when tool name conflicts', () => {
         tools.add('create_issue') // Pre-existing tool
-        const result = createNamespacedToolName('github', 'create_issue', tools, toolNameMapping)
+        const result = createNamespacedToolName('github', 'create_issue', tools, toolNameMapping, new Set())
         expect(result).to.equal('github___create_issue')
         expect(tools.has('github___create_issue')).to.be.true
         expect(toolNameMapping.get('github___create_issue')).to.deep.equal({
@@ -540,7 +532,7 @@ describe('createNamespacedToolName', () => {
     it('truncates server name when combined length exceeds limit', () => {
         tools.add('create_issue') // Force the function to use server prefix
         const longServer = 'very_long_server_name_that_definitely_exceeds_maximum_length_when_combined'
-        const result = createNamespacedToolName(longServer, 'create_issue', tools, toolNameMapping)
+        const result = createNamespacedToolName(longServer, 'create_issue', tools, toolNameMapping, new Set())
         expect(result.length).to.be.lessThanOrEqual(MAX_TOOL_NAME_LENGTH)
         expect(result.endsWith('___create_issue')).to.be.true
         expect(toolNameMapping.get(result)).to.deep.equal({
@@ -551,7 +543,7 @@ describe('createNamespacedToolName', () => {
 
     it('uses numeric suffix when tool name is too long', () => {
         const longTool = 'extremely_long_tool_name_that_definitely_exceeds_the_maximum_allowed_length_for_names'
-        const result = createNamespacedToolName('server', longTool, tools, toolNameMapping)
+        const result = createNamespacedToolName('server', longTool, tools, toolNameMapping, new Set())
         // Skip length check and use string comparison with the actual implementation behavior
         expect(toolNameMapping.get(result)).to.deep.equal({
             serverName: 'server',
@@ -561,7 +553,7 @@ describe('createNamespacedToolName', () => {
 
     it('truncates tool name and adds suffix when it exceeds MAX_TOOL_NAME_LENGTH', () => {
         const longTool = 'Smartanalyzerthatreadssummariescreatesmappingrulesandupdatespayloads'
-        const result = createNamespacedToolName('ConnectiveRx', longTool, tools, toolNameMapping)
+        const result = createNamespacedToolName('ConnectiveRx', longTool, tools, toolNameMapping, new Set())
         expect(result.length).to.equal(MAX_TOOL_NAME_LENGTH)
         expect(tools.has(result)).to.be.true
         expect(toolNameMapping.get(result)).to.deep.equal({
@@ -596,15 +588,22 @@ describe('createNamespacedToolName', () => {
         expect(result).to.equal('create_issue')
     })
 
-    it('refuses every built-in tool name', () => {
-        const builtIns = [FS_READ, FS_WRITE, FS_REPLACE, LIST_DIRECTORY, GREP_SEARCH, FILE_SEARCH, EXECUTE_BASH]
-        const reserved = new Set(builtIns)
+    it('refuses every statically dispatched built-in name even when it is not registered', () => {
+        const reserved = getReservedBuiltInToolNames([])
 
-        for (const builtIn of builtIns) {
+        for (const builtIn of STATIC_BUILT_IN_TOOL_NAMES) {
             const result = createNamespacedToolName('evil', builtIn, tools, toolNameMapping, reserved)
             expect(result, `${builtIn} must not be claimed`).to.equal(`evil___${builtIn}`)
             expect(tools.has(builtIn), `${builtIn} must stay unclaimed`).to.be.false
         }
+    })
+
+    it('also reserves dynamically registered built-in names', () => {
+        const reserved = getReservedBuiltInToolNames(['lspGetDocuments'])
+        const result = createNamespacedToolName('evil', 'lspGetDocuments', tools, toolNameMapping, reserved)
+
+        expect(result).to.equal('evil___lspGetDocuments')
+        expect(tools.has('lspGetDocuments')).to.be.false
     })
 
     it('gives two servers advertising the same built-in name distinct namespaced names', () => {
@@ -657,8 +656,8 @@ describe('createNamespacedToolName', () => {
         }
     })
 
-    it('leaves behavior unchanged when no reserved names are supplied', () => {
-        const result = createNamespacedToolName('evil', 'fsRead', tools, toolNameMapping)
+    it('supports an explicit empty reserved-name set', () => {
+        const result = createNamespacedToolName('evil', 'fsRead', tools, toolNameMapping, new Set())
         expect(result).to.equal('fsRead')
     })
 })
