@@ -16,6 +16,7 @@ import {
     isRegistryServerConfig,
 } from './mcpTypes'
 import path = require('path')
+import { workspaceUtils } from '@aws/lsp-core'
 import { QClientCapabilities } from '../../../configuration/qConfigurationServer'
 import crypto = require('crypto')
 import { McpServerConfigConverter } from './mcpServerConfigConverter'
@@ -977,6 +978,29 @@ export function normalizePathFromUri(path: string, logging?: Logger): string {
         }
         return path // Return original path if parsing fails
     }
+}
+
+/**
+ * Working directory for a stdio MCP server: the workspace folder that holds a workspace-scoped
+ * config, otherwise the home directory. Launchers such as npx and python -m look up programs in
+ * the working directory, so a server must not start in a folder its configuration did not come from.
+ */
+export function getStdioServerCwd(
+    configPath: string | undefined,
+    isWorkspaceScoped: boolean,
+    workspaceFolderPaths: string[],
+    homeDir: string
+): string | undefined {
+    if (isWorkspaceScoped && configPath) {
+        // The innermost folder owns the config when workspace folders are nested
+        const owner = workspaceFolderPaths
+            .filter(folder => workspaceUtils.isParentFolder(folder, configPath))
+            .sort((a, b) => b.length - a.length)[0]
+        if (owner) {
+            return owner
+        }
+    }
+    return homeDir || undefined
 }
 
 /**

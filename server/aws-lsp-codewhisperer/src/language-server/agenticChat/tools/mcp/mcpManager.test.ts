@@ -9,6 +9,7 @@ import { AGENT_TOOLS_CHANGED, MCP_SERVER_STATUS_CHANGED, McpManager } from './mc
 import * as mcpUtils from './mcpUtils'
 import { McpPermissionType, McpServerStatus, type MCPServerConfig, type MCPServerPermission } from './mcpTypes'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { URI } from 'vscode-uri'
 import { ProfileStatusMonitor } from './profileStatusMonitor'
 
 const fakeLogging = {
@@ -2021,7 +2022,7 @@ describe('consent gate for workspace-scoped MCP servers (P417451767)', () => {
     let recordApprovalStub: sinon.SinonStub
     let setStateSpy: sinon.SinonSpy
 
-    async function buildMgr(): Promise<any> {
+    async function buildMgr(workspaceFolders: string[] = ['/fake/workspace']): Promise<any> {
         const consentStore = require('./mcpConsentStore')
         hasApprovalStub = sinon.stub(consentStore, 'hasApproval').resolves(false)
         recordApprovalStub = sinon.stub(consentStore, 'recordApproval').resolves()
@@ -2033,6 +2034,7 @@ describe('consent gate for workspace-scoped MCP servers (P417451767)', () => {
             workspace: {
                 ...fakeWorkspace,
                 fs: { ...fakeWorkspace.fs, getUserHomeDir: () => fakeHome },
+                getAllWorkspaceFolders: () => workspaceFolders.map(folder => ({ uri: URI.file(folder).toString() })),
             },
             lsp: { window: { showMessageRequest: showMessageStub, showDocument: showDocumentStub } },
         }
@@ -2216,5 +2218,44 @@ describe('consent gate for workspace-scoped MCP servers (P417451767)', () => {
             await (mgr as any).initOneServerInternal('svc', cfg)
         } catch {}
         expect(recordApprovalStub.calledOnce).to.be.true
+    })
+
+    describe('stdio working directory', () => {
+        const otherWorkspace = '/tmp/ws-other'
+
+        // Captures the transport the server would start with, without spawning a process
+        function captureStdioCwd(): () => string | undefined {
+            let transport: any
+            sinon.stub(Client.prototype, 'connect').callsFake(async (t: any) => {
+                transport = t
+                throw new Error('connect stubbed')
+            })
+            return () => transport?._serverParams?.cwd
+        }
+
+        it('starts a global server in the home directory, not the open workspace folder', async () => {
+            const mgr = await buildMgr([otherWorkspace])
+            const stdioCwd = captureStdioCwd()
+            const cfg: MCPServerConfig = { command: 'npx', args: ['-y', 'some-server'], __configPath__: globalMcp }
+
+            try {
+                await (mgr as any).initOneServerInternal('svc', cfg)
+            } catch {}
+
+            expect(stdioCwd()).to.equal(fakeHome)
+        })
+
+        it('starts an approved workspace server in the folder that holds its config', async () => {
+            const mgr = await buildMgr([otherWorkspace, '/tmp/ws-a'])
+            hasApprovalStub.resolves(true)
+            const stdioCwd = captureStdioCwd()
+            const cfg: MCPServerConfig = { command: 'node', args: ['./server.js'], __configPath__: workspaceMcp }
+
+            try {
+                await (mgr as any).initOneServerInternal('svc', cfg)
+            } catch {}
+
+            expect(stdioCwd()).to.equal(URI.file('/tmp/ws-a').fsPath)
+        })
     })
 })

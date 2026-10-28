@@ -21,6 +21,7 @@ import {
     MAX_TOOL_NAME_LENGTH,
     enabledMCP,
     normalizePathFromUri,
+    getStdioServerCwd,
     saveAgentConfig,
     saveServerSpecificAgentConfig,
     isEmptyEnv,
@@ -627,6 +628,49 @@ describe('normalizePathFromUri', () => {
         URI.parse = originalParse
 
         expect(result).to.equal(invalidUri)
+    })
+})
+
+describe('getStdioServerCwd', () => {
+    const home = path.join(path.sep, 'home', 'user')
+    const wsA = path.join(path.sep, 'repos', 'a')
+    const wsB = path.join(path.sep, 'repos', 'b')
+    const wsBConfig = path.join(wsB, '.amazonq', 'mcp.json')
+
+    it('runs a workspace-scoped server in the folder that holds its config, not the first folder', () => {
+        expect(getStdioServerCwd(wsBConfig, true, [wsA, wsB], home)).to.equal(wsB)
+    })
+
+    it('uses the innermost folder when workspace folders are nested', () => {
+        const nested = path.join(wsB, 'packages', 'app')
+        const nestedConfig = path.join(nested, '.amazonq', 'agents', 'default.json')
+        expect(getStdioServerCwd(nestedConfig, true, [wsB, nested], home)).to.equal(nested)
+        expect(getStdioServerCwd(nestedConfig, true, [nested, wsB], home)).to.equal(nested)
+    })
+
+    it('runs a global server in the home directory even when workspace folders are open', () => {
+        const globalConfig = getGlobalMcpConfigPath(home)
+        expect(getStdioServerCwd(globalConfig, false, [wsA, wsB], home)).to.equal(home)
+    })
+
+    it('runs a server without a config path in the home directory', () => {
+        expect(getStdioServerCwd(undefined, false, [wsA], home)).to.equal(home)
+        expect(getStdioServerCwd(undefined, true, [wsA], home)).to.equal(home)
+    })
+
+    it('falls back to the home directory when no open folder holds the workspace config', () => {
+        expect(getStdioServerCwd(wsBConfig, true, [wsA], home)).to.equal(home)
+        expect(getStdioServerCwd(wsBConfig, true, [], home)).to.equal(home)
+    })
+
+    it('does not treat a sibling folder that shares a name prefix as the owner', () => {
+        const prefixSibling = path.join(path.sep, 'repos', 'b-other')
+        const siblingConfig = path.join(prefixSibling, '.amazonq', 'mcp.json')
+        expect(getStdioServerCwd(siblingConfig, true, [wsB], home)).to.equal(home)
+    })
+
+    it('returns undefined rather than an empty path when the home directory is unknown', () => {
+        expect(getStdioServerCwd(undefined, false, [wsA], '')).to.be.undefined
     })
 })
 

@@ -35,6 +35,7 @@ import {
     getGlobalMcpConfigPath,
     getGlobalPersonaConfigPath,
     normalizePathFromUri,
+    getStdioServerCwd,
     DEFAULT_TOOL_EXEC_TIMEOUT_MS,
     isUsableToolExecTimeout,
     resolveMcpRequestTimeoutMs,
@@ -45,6 +46,7 @@ import { Mutex } from 'async-mutex'
 import path = require('path')
 import { URI } from 'vscode-uri'
 import { MessageType } from '@aws/language-server-runtimes/protocol'
+import { workspaceUtils } from '@aws/lsp-core'
 import {
     hasApproval,
     recordApproval,
@@ -558,19 +560,19 @@ export class McpManager {
                             ? Object.fromEntries(Object.entries(finalEnv).filter(([k, v]) => k.trim() && v.trim()))
                             : {}),
                     }
-                    let cwd: string | undefined
+                    let workspaceFolderPaths: string[] = []
                     try {
-                        const folders = this.features.workspace.getAllWorkspaceFolders()
-                        if (folders.length > 0) cwd = URI.parse(folders[0].uri).fsPath
+                        workspaceFolderPaths = workspaceUtils.getWorkspaceFolderPaths(this.features.workspace)
                     } catch {
-                        this.features.logging.debug(
-                            `MCP: no workspace folder for [${serverName}], continuing without cwd`
-                        )
+                        this.features.logging.debug(`MCP: no workspace folders available for [${serverName}]`)
                     }
+                    const cwd = getStdioServerCwd(configPath, isWorkspaceScoped, workspaceFolderPaths, home)
                     const argsStr = (cfg.args ?? []).length > 0 ? ` ${(cfg.args ?? []).join(' ')}` : ''
                     const envKeys = Object.keys(finalEnv || {})
                     const envInfo = envKeys.length > 0 ? ` (env: ${envKeys.join(', ')})` : ''
-                    this.features.logging.info(`MCP: Executing command: ${cfg.command}${argsStr}${envInfo}`)
+                    this.features.logging.info(
+                        `MCP: Executing command: ${cfg.command}${argsStr}${envInfo} (cwd: ${cwd ?? 'inherited'})`
+                    )
 
                     transport = new StdioClientTransport({
                         command: cfg.command!,
