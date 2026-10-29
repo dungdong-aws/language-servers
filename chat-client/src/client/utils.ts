@@ -282,3 +282,43 @@ export function chatMessageToChatItem(message: ChatMessage, isPairProgrammingMod
         ...preparedItem,
     }
 }
+
+export type ChatLinkTarget = { kind: 'link' } | { kind: 'file'; filePath: string; fullPath?: string } | { kind: 'none' }
+
+/**
+ * Decides where a link clicked in a chat answer goes: http(s) URLs open as links, local paths
+ * go to the file-click handler, and everything else (other schemes, `//host` paths) is dropped.
+ */
+export function classifyChatLink(href: string | undefined): ChatLinkTarget {
+    if (!href) {
+        return { kind: 'none' }
+    }
+
+    try {
+        const url = new URL(href)
+        if ((url.protocol === 'http:' || url.protocol === 'https:') && url.hostname) {
+            return { kind: 'link' }
+        }
+    } catch {
+        // Not an absolute URL; check below whether it is a local path.
+    }
+
+    let decoded: string
+    try {
+        decoded = decodeURIComponent(href)
+    } catch {
+        return { kind: 'none' }
+    }
+
+    // `\\host\share`, `\/host` and `%2F%2Fhost` all reach a remote host or device once normalized.
+    const normalized = decoded.replace(/\\/g, '/')
+    if (normalized.startsWith('//') || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) {
+        return { kind: 'none' }
+    }
+
+    const filePath = decoded.split(/[?#]/)[0]
+    if (!filePath) {
+        return { kind: 'none' }
+    }
+    return normalized.startsWith('/') ? { kind: 'file', filePath, fullPath: filePath } : { kind: 'file', filePath }
+}

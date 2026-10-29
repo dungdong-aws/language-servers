@@ -72,6 +72,7 @@ import { ChatDatabase } from './tools/chatDb/chatDb'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError } from '@aws/lsp-core'
 import { CommandValidation, ToolApprovalException, requireResolvedTargets } from './tools/toolShared'
+import * as toolShared from './tools/toolShared'
 import { FsRead } from './tools/fsRead'
 import * as constants from './constants/constants'
 import { GENERIC_ERROR_MS } from './constants/constants'
@@ -4840,6 +4841,21 @@ ${' '.repeat(8)}}
             await chatController.onFileClicked({ tabId: mockTabId, filePath: 'inside.txt', fullPath: insideFile })
             assert.deepStrictEqual(openedUris(), [URI.file(insideFile).toString()])
         })
+
+        for (const networkPath of ['\\\\host\\share\\x', '//host/x']) {
+            it(`does not touch the filesystem or open a network path: ${networkPath}`, async () => {
+                const canonicalSpy = sinon.spy(toolShared, 'resolveCanonicalPath')
+                const existsSpy = sinon.spy(testFeatures.workspace.fs, 'exists')
+
+                await chatController.onFileClicked({ tabId: mockTabId, filePath: networkPath, fullPath: networkPath })
+                await chatController.onFileClicked({ tabId: mockTabId, filePath: networkPath })
+
+                sinon.assert.notCalled(canonicalSpy)
+                sinon.assert.notCalled(existsSpy)
+                sinon.assert.notCalled(showDocumentStub)
+                sinon.assert.notCalled(showMessageRequestStub)
+            })
+        }
 
         it('refuses a fullPath outside the workspace', async () => {
             await chatController.onFileClicked({ tabId: mockTabId, filePath: 'secret.txt', fullPath: outsideFile })

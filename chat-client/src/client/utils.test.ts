@@ -9,6 +9,7 @@ import {
     toMynahFileList,
     toDetailsWithoutIcon,
     toMynahContextCommand,
+    classifyChatLink,
 } from './utils'
 
 describe('utils', () => {
@@ -247,5 +248,60 @@ describe('utils', () => {
             const result = toMynahContextCommand(feature)
             assert.deepEqual(result, {})
         })
+    })
+
+    describe('classifyChatLink', () => {
+        for (const href of ['https://example.com/a', 'http://example.com']) {
+            it(`opens ${href} as a link`, () => {
+                assert.deepEqual(classifyChatLink(href), { kind: 'link' })
+            })
+        }
+
+        const relative: [string, string][] = [
+            ['src/foo.ts', 'src/foo.ts'],
+            ['./a.ts', './a.ts'],
+            ['../b.ts', '../b.ts'],
+            ['file/////', 'file/////'],
+            ['src/foo.ts#L10', 'src/foo.ts'],
+            ['src/foo.ts?x=1', 'src/foo.ts'],
+            ['..%2F..%2Fx', '../../x'],
+        ]
+        for (const [href, filePath] of relative) {
+            it(`routes ${href} as a file click with filePath`, () => {
+                assert.deepEqual(classifyChatLink(href), { kind: 'file', filePath })
+            })
+        }
+
+        it('routes an absolute path as a file click with fullPath', () => {
+            assert.deepEqual(classifyChatLink('/abs/x.ts'), {
+                kind: 'file',
+                filePath: '/abs/x.ts',
+                fullPath: '/abs/x.ts',
+            })
+        })
+
+        const ignored = [
+            '//host/x',
+            '\\\\host\\share\\x',
+            '\\/host',
+            '/\\host',
+            '%2F%2Fhost%2Fx',
+            '\\\\?\\UNC\\h\\s',
+            '\\\\.\\pipe\\x',
+            'file:///etc/passwd',
+            'vscode://x',
+            'command:x',
+            'mailto:a@b',
+            'javascript:x',
+            'C:\\x',
+            '#only-fragment',
+            '',
+            '%E0%A4%A',
+        ]
+        for (const href of ignored) {
+            it(`sends nothing for ${JSON.stringify(href)}`, () => {
+                assert.deepEqual(classifyChatLink(href), { kind: 'none' })
+            })
+        }
     })
 })

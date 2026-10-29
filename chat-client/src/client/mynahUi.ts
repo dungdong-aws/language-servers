@@ -60,6 +60,7 @@ import { disclaimerAcknowledgeButtonId, disclaimerCard } from './texts/disclaime
 import { ChatClientAdapter, ChatEventHandler } from '../contracts/chatClientAdapter'
 import { withAdapter } from './withAdapter'
 import {
+    classifyChatLink,
     contextListToHeader,
     prepareChatItemFromMessage,
     toMynahButtons,
@@ -519,6 +520,16 @@ export const createMynahUi = (
             mouseEvent?.stopPropagation()
             mouseEvent?.stopImmediatePropagation()
 
+            const target = classifyChatLink(link)
+            if (target.kind === 'file') {
+                // The answer's messageId is not a tool use id, so it is left out of the file click.
+                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
+                return
+            }
+            if (target.kind !== 'link') {
+                return
+            }
+
             const payload: LinkClickParams = {
                 tabId,
                 messageId,
@@ -544,6 +555,15 @@ export const createMynahUi = (
             mouseEvent?.preventDefault()
             mouseEvent?.stopPropagation()
             mouseEvent?.stopImmediatePropagation()
+
+            const target = classifyChatLink(link)
+            if (target.kind === 'file') {
+                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
+                return
+            }
+            if (target.kind !== 'link') {
+                return
+            }
 
             const payload: InfoLinkClickParams = {
                 tabId,

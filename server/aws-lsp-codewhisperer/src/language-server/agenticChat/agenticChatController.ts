@@ -283,6 +283,11 @@ type ChatHandlers = Omit<
     | 'onSubscriptionUpgrade'
 >
 
+// `\\host\share`, `//host/x`, `\\?\` and `\\.\` paths reach a remote host or a device, not a local file.
+function isNetworkOrDevicePath(filePath: string | undefined): boolean {
+    return !!filePath && filePath.replace(/\\/g, '/').startsWith('//')
+}
+
 export class AgenticChatController implements ChatHandlers {
     #features: Features
     #chatSessionManagementService: ChatSessionManagementService
@@ -4244,6 +4249,10 @@ export class AgenticChatController implements ChatHandlers {
             } else if (toolUse?.name === FS_READ) {
                 await this.#openIfAllowed(params.filePath, FS_READ, session.data)
             } else {
+                if (isNetworkOrDevicePath(params.fullPath ?? params.filePath)) {
+                    this.#features.logging.info(`Not opening network or device path from a chat file click`)
+                    return
+                }
                 const absolutePath = params.fullPath ?? (await this.#resolveAbsolutePath(params.filePath))
                 if (absolutePath) {
                     await this.#openIfAllowed(absolutePath, toolUse?.name ?? FS_READ, session.data)
@@ -4266,6 +4275,10 @@ export class AgenticChatController implements ChatHandlers {
      * context files rather than arbitrary disk contents.
      */
     async #openIfAllowed(filePath: string, toolName: string, session: ChatSessionService | undefined): Promise<void> {
+        if (isNetworkOrDevicePath(filePath)) {
+            this.#features.logging.info(`Not opening network or device path from a chat file click`)
+            return
+        }
         const canonicalPath = await resolveCanonicalPath(filePath)
         const promptsDirectory = await resolveCanonicalPath(getUserPromptsDirectory())
         const isPromptFile =

@@ -810,6 +810,53 @@ describe('MynahUI', () => {
         })
     })
 
+    describe('chat answer link clicks', () => {
+        const props = () => (mynahUi as any).props
+
+        it('sends a relative link as a file click without the answer messageId', () => {
+            props().onLinkClick('tab-1', 'answer-1', 'src/foo.ts#L10', undefined, 'event-1')
+
+            sinon.assert.calledOnceWithExactly(outboundChatApi.fileClick as sinon.SinonStub, {
+                tabId: 'tab-1',
+                filePath: 'src/foo.ts',
+                fullPath: undefined,
+            })
+            sinon.assert.notCalled(outboundChatApi.linkClick as sinon.SinonStub)
+        })
+
+        it('sends an https link as a link click', () => {
+            props().onLinkClick('tab-1', 'answer-1', 'https://example.com/doc', undefined, 'event-1')
+
+            sinon.assert.calledOnceWithExactly(outboundChatApi.linkClick as sinon.SinonStub, {
+                tabId: 'tab-1',
+                messageId: 'answer-1',
+                link: 'https://example.com/doc',
+                eventId: 'event-1',
+            })
+            sinon.assert.notCalled(outboundChatApi.fileClick as sinon.SinonStub)
+        })
+
+        it('sends nothing for a network path or a non-http scheme', () => {
+            props().onLinkClick('tab-1', 'answer-1', '\\\\host\\share\\x', undefined, 'event-1')
+            props().onInfoLinkClick('tab-1', 'vscode://x', undefined, 'event-2')
+
+            sinon.assert.notCalled(outboundChatApi.linkClick as sinon.SinonStub)
+            sinon.assert.notCalled(outboundChatApi.infoLinkClick as sinon.SinonStub)
+            sinon.assert.notCalled(outboundChatApi.fileClick as sinon.SinonStub)
+        })
+
+        it('sends an absolute info link path as a file click with fullPath', () => {
+            props().onInfoLinkClick('tab-1', '/home/x/a.ts', undefined, 'event-1')
+
+            sinon.assert.calledOnceWithExactly(outboundChatApi.fileClick as sinon.SinonStub, {
+                tabId: 'tab-1',
+                filePath: '/home/x/a.ts',
+                fullPath: '/home/x/a.ts',
+            })
+            sinon.assert.notCalled(outboundChatApi.infoLinkClick as sinon.SinonStub)
+        })
+    })
+
     describe('onMessageDismiss', () => {
         it('acknowledges the deprecation card and removes it from every open and future new chat', () => {
             const updateTabDefaultsSpy = sinon.spy(mynahUi, 'updateTabDefaults')
