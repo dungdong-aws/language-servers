@@ -430,6 +430,7 @@ export async function requiresPathAcceptance(
 }
 
 function isSensitivePath(filePath: string): boolean {
+    const normalizedPath = filePath.replace(/\\/g, '/')
     const sensitivePatterns = [
         /\/\.ssh\//,
         /\/\.aws\//,
@@ -445,5 +446,5 @@ function isSensitivePath(filePath: string): boolean {
         /\/dev\//,
     ]
 
-    return sensitivePatterns.some(pattern => pattern.test(filePath))
+    return sensitivePatterns.some(pattern => pattern.test(normalizedPath))
 }

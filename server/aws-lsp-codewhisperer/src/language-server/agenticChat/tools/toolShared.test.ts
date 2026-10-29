@@ -415,6 +415,24 @@ describe('toolShared', () => {
             assert.ok(result.warning?.includes('sensitive system files'))
         })
 
+        for (const filePath of [
+            'C:\\Users\\developer\\.ssh\\id_rsa',
+            'C:\\Users\\developer\\.aws\\config',
+            'C:\\project\\.env',
+        ]) {
+            it(`should identify Windows-style sensitive path ${filePath}`, async () => {
+                const result = await requiresPathAcceptance(
+                    filePath,
+                    'testTool',
+                    mockWorkspace,
+                    mockLogging as unknown as Features['logging']
+                )
+
+                assert.strictEqual(result.requiresAcceptance, true)
+                assert.ok(result.warning?.includes('sensitive system files'))
+            })
+        }
+
         it('should require acceptance for paths with traversal that resolve to sensitive locations', async () => {
             // Path that looks workspace-relative but resolves to /etc via traversal
             const filePath = '/workspace/folder1/../../etc/passwd'
