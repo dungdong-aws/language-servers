@@ -4845,7 +4845,9 @@ ${' '.repeat(8)}}
         for (const networkPath of ['\\\\host\\share\\x', '//host/x']) {
             it(`does not touch the filesystem or open a network path: ${networkPath}`, async () => {
                 const canonicalSpy = sinon.spy(toolShared, 'resolveCanonicalPath')
-                const existsSpy = sinon.spy(testFeatures.workspace.fs, 'exists')
+                // The suite's fs is a plain object without `exists`, so stub it in rather than spying.
+                const existsSpy = sinon.stub().resolves(true)
+                testFeatures.workspace.fs.exists = existsSpy
 
                 await chatController.onFileClicked({ tabId: mockTabId, filePath: networkPath, fullPath: networkPath })
                 await chatController.onFileClicked({ tabId: mockTabId, filePath: networkPath })

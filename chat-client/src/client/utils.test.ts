@@ -272,13 +272,20 @@ describe('utils', () => {
             })
         }
 
-        it('routes an absolute path as a file click with fullPath', () => {
-            assert.deepEqual(classifyChatLink('/abs/x.ts'), {
-                kind: 'file',
-                filePath: '/abs/x.ts',
-                fullPath: '/abs/x.ts',
+        const absolute: [string, string][] = [
+            ['/abs/x.ts', '/abs/x.ts'],
+            ['C:\\abs\\x.ts', 'C:\\abs\\x.ts'],
+            ['C:/abs/x.ts#L10', 'C:/abs/x.ts'],
+        ]
+        for (const [href, filePath] of absolute) {
+            it(`routes ${href} as a file click with fullPath`, () => {
+                assert.deepEqual(classifyChatLink(href), {
+                    kind: 'file',
+                    filePath,
+                    fullPath: filePath,
+                })
             })
-        })
+        }
 
         const ignored = [
             '//host/x',
@@ -293,7 +300,7 @@ describe('utils', () => {
             'command:x',
             'mailto:a@b',
             'javascript:x',
-            'C:\\x',
+            'C:relative.txt',
             '#only-fragment',
             '',
             '%E0%A4%A',

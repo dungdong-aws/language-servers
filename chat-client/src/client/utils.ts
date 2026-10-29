@@ -312,7 +312,7 @@ export function classifyChatLink(href: string | undefined): ChatLinkTarget {
 
     // `\\host\share`, `\/host` and `%2F%2Fhost` all reach a remote host or device once normalized.
     const normalized = decoded.replace(/\\/g, '/')
-    if (normalized.startsWith('//') || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) {
+    if (normalized.startsWith('//')) {
         return { kind: 'none' }
     }
 
@@ -320,5 +320,17 @@ export function classifyChatLink(href: string | undefined): ChatLinkTarget {
     if (!filePath) {
         return { kind: 'none' }
     }
-    return normalized.startsWith('/') ? { kind: 'file', filePath, fullPath: filePath } : { kind: 'file', filePath }
+
+    const normalizedFilePath = filePath.replace(/\\/g, '/')
+    // A Windows drive letter resembles a URI scheme but denotes an absolute local path.
+    if (/^[a-zA-Z]:\//.test(normalizedFilePath)) {
+        return { kind: 'file', filePath, fullPath: filePath }
+    }
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) {
+        return { kind: 'none' }
+    }
+
+    return normalizedFilePath.startsWith('/')
+        ? { kind: 'file', filePath, fullPath: filePath }
+        : { kind: 'file', filePath }
 }

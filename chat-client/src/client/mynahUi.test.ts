@@ -824,6 +824,17 @@ describe('MynahUI', () => {
             sinon.assert.notCalled(outboundChatApi.linkClick as sinon.SinonStub)
         })
 
+        it('sends an absolute Windows answer link as a file click with fullPath', () => {
+            props().onLinkClick('tab-1', 'answer-1', 'C:\\work\\src\\a.ts#L10', undefined, 'event-1')
+
+            sinon.assert.calledOnceWithExactly(outboundChatApi.fileClick as sinon.SinonStub, {
+                tabId: 'tab-1',
+                filePath: 'C:\\work\\src\\a.ts',
+                fullPath: 'C:\\work\\src\\a.ts',
+            })
+            sinon.assert.notCalled(outboundChatApi.linkClick as sinon.SinonStub)
+        })
+
         it('sends an https link as a link click', () => {
             props().onLinkClick('tab-1', 'answer-1', 'https://example.com/doc', undefined, 'event-1')
 
