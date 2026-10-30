@@ -4833,11 +4833,6 @@ ${' '.repeat(8)}}
             testFeatures.lsp.window.showMessageRequest = showMessageRequestStub
             showMessageStub = sinon.stub().resolves()
             testFeatures.lsp.window.showMessage = showMessageStub
-            testFeatures.workspace.fs.isFile = (p: string) =>
-                fs.stat(p).then(
-                    s => s.isFile(),
-                    () => false
-                )
             chatController.onTabAdd({ tabId: mockTabId })
         })
 
