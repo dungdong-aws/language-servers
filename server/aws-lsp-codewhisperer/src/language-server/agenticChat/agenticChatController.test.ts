@@ -5071,24 +5071,54 @@ ${' '.repeat(8)}}
             })
         }
 
-        it('records an fsRead approval for a home-relative fsRead input', async () => {
+        // `~/x` must match on every platform, including Windows where the native separator is `\`.
+        for (const input of [...new Set(['~/secret.txt', `~${path.sep}secret.txt`])]) {
+            it(`records an fsRead approval for a home-relative fsRead input: ${input}`, async () => {
+                showMessageRequestStub.resolves(OPEN)
+                const session = chatSessionManagementService.getSession(mockTabId).data!
+                session.toolUseLookup.set('read-8', {
+                    toolUseId: 'read-8',
+                    name: 'fsRead',
+                    input: { paths: [input] },
+                })
+                const homeStub = sinon.stub(os, 'homedir').returns(outsideDir)
+                try {
+                    await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
+                    await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
+                } finally {
+                    homeStub.restore()
+                }
+
+                sinon.assert.calledOnce(showMessageRequestStub)
+                assert.strictEqual(openedUris().length, 2)
+            })
+        }
+
+        it('does not record an fsRead approval for a ~user fsRead input', async () => {
             showMessageRequestStub.resolves(OPEN)
+            // `sanitize` expands `~bob/secret.txt` to `<home>/bob/secret.txt`, so put a real file there. Only the
+            // `~user` exclusion can then stop the click from keeping the Open choice.
+            const misExpanded = path.join(outsideDir, 'bob', 'secret.txt')
+            await fs.mkdir(path.dirname(misExpanded), { recursive: true })
+            await fs.writeFile(misExpanded, 'bob')
             const session = chatSessionManagementService.getSession(mockTabId).data!
-            session.toolUseLookup.set('read-8', {
-                toolUseId: 'read-8',
+            session.toolUseLookup.set('read-9', {
+                toolUseId: 'read-9',
                 name: 'fsRead',
-                input: { paths: [`~${path.sep}secret.txt`] },
+                input: { paths: ['~bob/secret.txt'] },
             })
             const homeStub = sinon.stub(os, 'homedir').returns(outsideDir)
             try {
-                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
-                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
+                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-9', filePath: misExpanded })
+                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-9', filePath: misExpanded })
             } finally {
                 homeStub.restore()
             }
 
-            sinon.assert.calledOnce(showMessageRequestStub)
+            sinon.assert.calledTwice(showMessageRequestStub)
+            assert.ok(!showMessageRequestStub.firstCall.args[0].message.includes('able to read'))
             assert.strictEqual(openedUris().length, 2)
+            assert.strictEqual(session.approvedPaths.size, 0)
         })
 
         it('records an fsRead approval for a path read by a later fsRead call merged into the same card', async () => {
