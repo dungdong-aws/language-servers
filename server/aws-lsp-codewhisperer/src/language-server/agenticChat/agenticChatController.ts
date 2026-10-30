@@ -4339,6 +4339,16 @@ export class AgenticChatController implements ChatHandlers {
      * rather than trusting the clicked card.
      */
     async #isFsReadRequestedPath(canonicalPath: string, session: ChatSessionService | undefined): Promise<boolean> {
+        // An approved directory covers everything under it, so only a regular file can keep an Open choice.
+        let isFile = false
+        try {
+            isFile = await this.#features.workspace.fs.isFile(canonicalPath)
+        } catch {
+            // Treat an unreadable target as not a file.
+        }
+        if (!isFile) {
+            return false
+        }
         for (const toolUse of session?.toolUseLookup.values() ?? []) {
             if (toolUse.name !== FS_READ) {
                 continue

@@ -4833,6 +4833,11 @@ ${' '.repeat(8)}}
             testFeatures.lsp.window.showMessageRequest = showMessageRequestStub
             showMessageStub = sinon.stub().resolves()
             testFeatures.lsp.window.showMessage = showMessageStub
+            testFeatures.workspace.fs.isFile = (p: string) =>
+                fs.stat(p).then(
+                    s => s.isFile(),
+                    () => false
+                )
             chatController.onTabAdd({ tabId: mockTabId })
         })
 
@@ -5040,6 +5045,36 @@ ${' '.repeat(8)}}
             assert.strictEqual(openedUris().length, 2)
             assert.strictEqual(session.approvedPaths.size, 0)
         })
+
+        for (const [label, input] of [
+            ['an absolute directory', () => outsideDir],
+            ['the bare home directory', () => '~'],
+        ] as const) {
+            it(`does not record an fsRead approval when the fsRead input is ${label}`, async () => {
+                showMessageRequestStub.resolves(OPEN)
+                const session = chatSessionManagementService.getSession(mockTabId).data!
+                session.toolUseLookup.set('read-dir', {
+                    toolUseId: 'read-dir',
+                    name: 'fsRead',
+                    input: { paths: [input()] },
+                })
+                const homeStub = sinon.stub(os, 'homedir').returns(outsideDir)
+                try {
+                    // A client that clicks the directory itself must not gain fsRead access to everything below it.
+                    await chatController.onFileClicked({
+                        tabId: mockTabId,
+                        messageId: 'read-dir',
+                        filePath: outsideDir,
+                    })
+                } finally {
+                    homeStub.restore()
+                }
+
+                sinon.assert.calledOnce(showMessageRequestStub)
+                assert.ok(!showMessageRequestStub.firstCall.args[0].message.includes('able to read'))
+                assert.strictEqual(session.approvedPaths.size, 0)
+            })
+        }
 
         it('records an fsRead approval for a home-relative fsRead input', async () => {
             showMessageRequestStub.resolves(OPEN)
