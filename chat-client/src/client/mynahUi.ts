@@ -520,23 +520,24 @@ export const createMynahUi = (
             mouseEvent?.stopPropagation()
             mouseEvent?.stopImmediatePropagation()
 
-            const target = classifyChatLink(link)
-            if (target.kind === 'file') {
-                // The answer's messageId is not a tool use id, so it is left out of the file click.
-                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
-                return
-            }
-            if (target.kind !== 'link') {
-                return
-            }
-
             const payload: LinkClickParams = {
                 tabId,
                 messageId,
                 link,
                 eventId,
             }
-            messager.onLinkClick(payload)
+            const target = classifyChatLink(link)
+            if (target.kind === 'link') {
+                messager.onLinkClick(payload)
+                return
+            }
+            messager.onLinkClickTelemetry(payload)
+            if (target.kind === 'file') {
+                // The answer's messageId is not a tool use id, so it is left out of the file click.
+                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
+            } else {
+                notifyUnsupportedLink()
+            }
         },
         onSourceLinkClick: (tabId, messageId, link, mouseEvent, eventId) => {
             mouseEvent?.preventDefault()
@@ -556,21 +557,22 @@ export const createMynahUi = (
             mouseEvent?.stopPropagation()
             mouseEvent?.stopImmediatePropagation()
 
-            const target = classifyChatLink(link)
-            if (target.kind === 'file') {
-                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
-                return
-            }
-            if (target.kind !== 'link') {
-                return
-            }
-
             const payload: InfoLinkClickParams = {
                 tabId,
                 link,
                 eventId,
             }
-            messager.onInfoLinkClick(payload)
+            const target = classifyChatLink(link)
+            if (target.kind === 'link') {
+                messager.onInfoLinkClick(payload)
+                return
+            }
+            messager.onInfoLinkClickTelemetry(payload)
+            if (target.kind === 'file') {
+                messager.onFileClick({ tabId, filePath: target.filePath, fullPath: target.fullPath })
+            } else {
+                notifyUnsupportedLink()
+            }
         },
         onInBodyButtonClicked: (tabId, messageId, action, eventId) => {
             if (action.id === disclaimerAcknowledgeButtonId) {
@@ -931,6 +933,14 @@ export const createMynahUi = (
         const tabId = mynahUi.getSelectedTabId()
 
         return tabId ?? createTabId()
+    }
+
+    const notifyUnsupportedLink = () => {
+        mynahUi.notify({
+            type: NotificationType.WARNING,
+            title: 'Link not opened',
+            content: 'Chat opens only web (http or https) links and local file paths.',
+        })
     }
 
     const getImageContextCount = (tabId: string) => {

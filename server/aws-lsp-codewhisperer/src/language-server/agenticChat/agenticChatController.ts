@@ -179,6 +179,7 @@ import {
     discardResolvedTargets,
     withResolvedTargets,
     getFileUpdate,
+    isSamePath,
     requiresPathAcceptance,
     resolveCanonicalPath,
     resolveSymlinkAwarePath,
@@ -4254,9 +4255,16 @@ export class AgenticChatController implements ChatHandlers {
                     return
                 }
                 const absolutePath = params.fullPath ?? (await this.#resolveAbsolutePath(params.filePath))
-                if (absolutePath) {
-                    await this.#openIfAllowed(absolutePath, toolUse?.name ?? FS_READ, session.data)
+                if (!absolutePath) {
+                    await this.#features.lsp.window.showMessage({
+                        type: MessageType.Warning,
+                        message: `Could not find ${params.filePath} in your workspace.`,
+                    })
+                    return
                 }
+                // Only an fsRead card can retain an Open choice; answer links and other cards prompt on every
+                // out-of-workspace click, though an approval the tool already holds still applies.
+                await this.#openIfAllowed(absolutePath, toolUse?.name ?? FS_READ, session.data)
             }
         } catch (e: any) {
             this.#features.logging.error(`Error opening file: ${e.message}`)
@@ -4296,27 +4304,56 @@ export class AgenticChatController implements ChatHandlers {
                 session?.approvedPaths
             )
             if (requiresAcceptance) {
-                // Paths from model output open only after explicit confirmation. An fsRead card may retain that
-                // confirmation for the same tool; opening an answer link must not grant tool access.
+                // Paths from model output open only after explicit confirmation. Opening a file the fsRead tool
+                // was asked to read may retain that choice for fsRead; any other click must not grant tool access.
+                const retainApproval = recordToolApproval && (await this.#isFsReadRequestedPath(canonicalPath, session))
                 const open: MessageActionItem = { title: 'Open' }
                 const cancel: MessageActionItem = { title: 'Cancel' }
                 const choice = await this.#features.lsp.window.showMessageRequest({
                     type: MessageType.Warning,
                     message:
                         `${warning ?? 'This file is outside your workspace.'}\n\n` +
-                        `Open ${canonicalPath} in the editor?`,
+                        `Open ${canonicalPath} in the editor?` +
+                        (retainApproval
+                            ? ' Amazon Q will also be able to read this file for the rest of this chat.'
+                            : ''),
                     actions: [open, cancel],
                 })
                 if (choice?.title !== open.title) {
                     this.#features.logging.info(`User declined to open out-of-workspace file from a chat card`)
                     return
                 }
-                if (recordToolApproval) {
+                if (retainApproval) {
                     session?.addApprovedPath(canonicalPath, toolName)
                 }
             }
         }
         await this.#features.lsp.window.showDocument({ uri: URI.file(canonicalPath).toString() })
+    }
+
+    /**
+     * Whether any fsRead tool use in this session asked for `canonicalPath`. The card's messageId and filePath come
+     * from the client, and consecutive fsRead calls share one card, so the path is checked against every fsRead input
+     * rather than trusting the clicked card.
+     */
+    async #isFsReadRequestedPath(canonicalPath: string, session: ChatSessionService | undefined): Promise<boolean> {
+        for (const toolUse of session?.toolUseLookup.values() ?? []) {
+            if (toolUse.name !== FS_READ) {
+                continue
+            }
+            const paths = (toolUse.input as unknown as FsReadParams | undefined)?.paths
+            for (const requested of Array.isArray(paths) ? paths : []) {
+                if (
+                    typeof requested === 'string' &&
+                    path.isAbsolute(requested) &&
+                    !isNetworkOrDevicePath(requested) &&
+                    isSamePath(await resolveCanonicalPath(requested), canonicalPath)
+                ) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     async onFollowUpClicked(params: FollowUpClickParams) {

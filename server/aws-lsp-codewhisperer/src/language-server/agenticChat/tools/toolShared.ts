@@ -277,7 +277,7 @@ function normalizePathSeparators(filePath: string): string {
  * which is the precedent `isParentFolder` already follows, and a trailing
  * separator does not change identity.
  */
-function isSamePath(left: string, right: string): boolean {
+export function isSamePath(left: string, right: string): boolean {
     const comparable = (value: string) => {
         const normalized = path.normalize(value).replace(/[\\/]+$/, '')
         return process.platform === 'win32' || process.platform === 'darwin' ? normalized.toLowerCase() : normalized
