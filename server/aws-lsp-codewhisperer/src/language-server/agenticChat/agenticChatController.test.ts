@@ -4918,6 +4918,7 @@ ${' '.repeat(8)}}
             const request = showMessageRequestStub.firstCall.args[0]
             assert.strictEqual(request.type, MessageType.Warning)
             assert.ok(request.message.includes(outsideFile), 'dialog names the exact path being opened')
+            assert.ok(request.message.includes('in the editor'), 'dialog explains where the file will open')
             assert.deepStrictEqual(
                 request.actions.map((a: { title: string }) => a.title),
                 ['Open', 'Cancel']
@@ -4931,13 +4932,37 @@ ${' '.repeat(8)}}
             sinon.assert.notCalled(showDocumentStub)
         })
 
-        it('remembers an Open choice so the same path does not prompt again', async () => {
+        it('remembers an Open choice for an fsRead card so the same path does not prompt again', async () => {
             showMessageRequestStub.resolves(OPEN)
-            await chatController.onFileClicked({ tabId: mockTabId, filePath: 'secret.txt', fullPath: outsideFile })
-            await chatController.onFileClicked({ tabId: mockTabId, filePath: 'secret.txt', fullPath: outsideFile })
+            const session = chatSessionManagementService.getSession(mockTabId).data!
+            session.toolUseLookup.set('read-4', {
+                toolUseId: 'read-4',
+                name: 'fsRead',
+                input: { paths: [outsideFile] },
+            })
+
+            await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-4', filePath: outsideFile })
+            await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-4', filePath: outsideFile })
 
             sinon.assert.calledOnce(showMessageRequestStub)
             assert.strictEqual(openedUris().length, 2)
+        })
+
+        it('does not grant fsRead approval when the user opens an answer link', async () => {
+            showMessageRequestStub.resolves(OPEN)
+            const session = chatSessionManagementService.getSession(mockTabId).data!
+
+            await chatController.onFileClicked({ tabId: mockTabId, filePath: 'secret.txt', fullPath: outsideFile })
+
+            assert.deepStrictEqual(openedUris(), [URI.file(outsideFile).toString()])
+            const nextRead = await toolShared.requiresPathAcceptance(
+                outsideFile,
+                'fsRead',
+                testFeatures.workspace,
+                testFeatures.logging,
+                session.approvedPaths
+            )
+            assert.strictEqual(nextRead.requiresAcceptance, true)
         })
 
         it('surfaces the sensitive-path reason in the dialog for a sensitive out-of-workspace file', async () => {

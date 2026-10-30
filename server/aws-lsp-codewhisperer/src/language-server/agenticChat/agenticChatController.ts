@@ -4247,7 +4247,7 @@ export class AgenticChatController implements ChatHandlers {
                     fileContent: toolUse.fileChange?.after,
                 })
             } else if (toolUse?.name === FS_READ) {
-                await this.#openIfAllowed(params.filePath, FS_READ, session.data)
+                await this.#openIfAllowed(params.filePath, FS_READ, session.data, true)
             } else {
                 if (isNetworkOrDevicePath(params.fullPath ?? params.filePath)) {
                     this.#features.logging.info(`Not opening network or device path from a chat file click`)
@@ -4264,17 +4264,20 @@ export class AgenticChatController implements ChatHandlers {
     }
 
     /**
-     * Open a file from a chat file-list card only when the user could have
-     * read it through the tools: inside a workspace folder, or a path the user
-     * already approved for `toolName` in this session. Card paths come from
-     * model tool results and service findings, so an unchecked path plus one
-     * click would open any readable file and feed it to completion context.
+     * Open a file from a chat click only when the user could have read it through the tools: inside a workspace
+     * folder, or a path already approved for `toolName` in this session. Paths can come from model-generated
+     * answer links, tool results, and service findings, so an unchecked path plus one click would open any readable
+     * file and feed it to completion context.
      *
-     * The user prompts directory is allowed as well: `#resolveAbsolutePath`
-     * deliberately resolves `.prompt.md` files there, and they are user-authored
-     * context files rather than arbitrary disk contents.
+     * The user prompts directory is allowed as well: `#resolveAbsolutePath` deliberately resolves `.prompt.md`
+     * files there, and they are user-authored context files rather than arbitrary disk contents.
      */
-    async #openIfAllowed(filePath: string, toolName: string, session: ChatSessionService | undefined): Promise<void> {
+    async #openIfAllowed(
+        filePath: string,
+        toolName: string,
+        session: ChatSessionService | undefined,
+        recordToolApproval = false
+    ): Promise<void> {
         if (isNetworkOrDevicePath(filePath)) {
             this.#features.logging.info(`Not opening network or device path from a chat file click`)
             return
@@ -4293,22 +4296,24 @@ export class AgenticChatController implements ChatHandlers {
                 session?.approvedPaths
             )
             if (requiresAcceptance) {
-                // The path on a chat card comes from a tool result, not the
-                // user, so a path outside the workspace is opened only after an
-                // explicit confirmation. Approving records the path for this
-                // tool so a later click does not prompt again.
+                // Paths from model output open only after explicit confirmation. An fsRead card may retain that
+                // confirmation for the same tool; opening an answer link must not grant tool access.
                 const open: MessageActionItem = { title: 'Open' }
                 const cancel: MessageActionItem = { title: 'Cancel' }
                 const choice = await this.#features.lsp.window.showMessageRequest({
                     type: MessageType.Warning,
-                    message: `${warning ?? 'This file is outside your workspace.'}\n\n` + `Open ${canonicalPath}?`,
+                    message:
+                        `${warning ?? 'This file is outside your workspace.'}\n\n` +
+                        `Open ${canonicalPath} in the editor?`,
                     actions: [open, cancel],
                 })
                 if (choice?.title !== open.title) {
                     this.#features.logging.info(`User declined to open out-of-workspace file from a chat card`)
                     return
                 }
-                session?.addApprovedPath(canonicalPath, toolName)
+                if (recordToolApproval) {
+                    session?.addApprovedPath(canonicalPath, toolName)
+                }
             }
         }
         await this.#features.lsp.window.showDocument({ uri: URI.file(canonicalPath).toString() })
