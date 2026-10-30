@@ -4903,7 +4903,8 @@ ${' '.repeat(8)}}
             sinon.assert.calledOnce(showMessageStub)
             const notice = showMessageStub.firstCall.args[0]
             assert.strictEqual(notice.type, MessageType.Warning)
-            assert.ok(notice.message.includes('src/missing.ts'), notice.message)
+            assert.ok(notice.message.includes('missing.ts'), notice.message)
+            assert.ok(!notice.message.includes('src/'), 'only the bounded file name is echoed')
             sinon.assert.notCalled(showDocumentStub)
             sinon.assert.notCalled(showMessageRequestStub)
         })
@@ -5038,6 +5039,26 @@ ${' '.repeat(8)}}
             assert.ok(!showMessageRequestStub.firstCall.args[0].message.includes('able to read'))
             assert.strictEqual(openedUris().length, 2)
             assert.strictEqual(session.approvedPaths.size, 0)
+        })
+
+        it('records an fsRead approval for a home-relative fsRead input', async () => {
+            showMessageRequestStub.resolves(OPEN)
+            const session = chatSessionManagementService.getSession(mockTabId).data!
+            session.toolUseLookup.set('read-8', {
+                toolUseId: 'read-8',
+                name: 'fsRead',
+                input: { paths: [`~${path.sep}secret.txt`] },
+            })
+            const homeStub = sinon.stub(os, 'homedir').returns(outsideDir)
+            try {
+                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
+                await chatController.onFileClicked({ tabId: mockTabId, messageId: 'read-8', filePath: outsideFile })
+            } finally {
+                homeStub.restore()
+            }
+
+            sinon.assert.calledOnce(showMessageRequestStub)
+            assert.strictEqual(openedUris().length, 2)
         })
 
         it('records an fsRead approval for a path read by a later fsRead call merged into the same card', async () => {

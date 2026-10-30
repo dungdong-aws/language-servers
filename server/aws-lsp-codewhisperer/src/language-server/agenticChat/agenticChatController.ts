@@ -4256,9 +4256,11 @@ export class AgenticChatController implements ChatHandlers {
                 }
                 const absolutePath = params.fullPath ?? (await this.#resolveAbsolutePath(params.filePath))
                 if (!absolutePath) {
+                    // The path comes from model output, so only a bounded file name is echoed back.
+                    const name = path.basename(params.filePath).slice(0, 100)
                     await this.#features.lsp.window.showMessage({
                         type: MessageType.Warning,
-                        message: `Could not find ${params.filePath} in your workspace.`,
+                        message: `Could not find ${name} in your workspace.`,
                     })
                     return
                 }
@@ -4345,7 +4347,7 @@ export class AgenticChatController implements ChatHandlers {
             for (const requested of Array.isArray(paths) ? paths : []) {
                 if (
                     typeof requested === 'string' &&
-                    path.isAbsolute(requested) &&
+                    (path.isAbsolute(requested) || /^~(?:[\\/]|$)/.test(requested)) &&
                     !isNetworkOrDevicePath(requested) &&
                     isSamePath(await resolveCanonicalPath(requested), canonicalPath)
                 ) {
